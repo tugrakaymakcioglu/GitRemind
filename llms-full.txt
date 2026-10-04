@@ -1,0 +1,401 @@
+# GitRemind — Full Architectural and Technical Reference for AI Coding Agents
+
+> Comprehensive developer guide, internal module documentation, type definitions, and integration mechanics for AI agents working with or synthesizing code for GitRemind.
+
+---
+
+## 1. System Overview & Core Purpose
+
+GitRemind is an automated developer productivity daemon and CLI tool written in TypeScript. It tracks Git repositories on the local filesystem, computes clean/dirty working tree states via high-speed porcelain parsing, and dispatches native desktop notifications when:
+1. **Interval Exceeded**: Uncommitted changes have remained idle past the configured cadence (default: 20 minutes).
+2. **Project Closed**: An IDE or editor process launched via `gitremind open <editor> <path>` terminates while uncommitted changes exist.
+3. **Terminal Exited**: A terminal shell session exits while dirty files remain (via PowerShell/Bash/Zsh hooks).
+4. **Interactive Dashboard**: A developer accesses real-time repository health via a Claude CLI-style terminal dashboard (`npx gitremind` or `gitremind dashboard`).
+5. **Commit Assistance**: A developer invokes the Conventional Commit wizard (`gitremind commit`) to stage and commit changes adhering to the Conventional Commits 1.0.0 specification.
+
+---
+
+## 2. Architecture & Event Flow
+
+```
+                      ┌──────────────────────────┐
+                      │   File System Mutation   │
+                      └─────────────┬────────────┘
+                                    │
+                                    ▼
+                      ┌──────────────────────────┐
+                      │    Chokidar FSWatcher    │
+                      └─────────────┬────────────┘
+                                    │ (Event: add, change, unlink)
+                                    ▼
+                      ┌──────────────────────────┐
+                      │  2500ms Debounce Buffer  │
+                      └─────────────┬────────────┘
+                                    │
+                                    ▼
+                      ┌──────────────────────────┐
+                      │   git status --porcelain │
+                      └─────────────┬────────────┘
+                                    │
+                                    ▼
+                      ┌──────────────────────────┐
+                      │  parsePorcelainLine()    │
+                      │  GitRepoState Evaluator  │
+                      └─────────────┬────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+            [State Changed: Dirty]          [State Changed: Clean]
+                    │                               │
+                    ▼                               ▼
+       ┌────────────────────────┐       ┌────────────────────────┐
+       │ Set firstDirtyAt       │       │ Clear firstDirtyAt     │
+       │ Update config metadata │       │ Clear lastNotifiedAt   │
+       └────────────┬───────────┘       └────────────────────────┘
+                    │
+                    ▼
+       ┌────────────────────────┐
+       │ 60s Interval Timer     │
+       │ Check (Now - Baseline) │
+       │      >= Interval?      │
+       └────────────┬───────────┘
+                    │
+            ┌───────┴───────┐
+           YES              NO
+            │                │
+            ▼                ▼
+   ┌─────────────────┐   [Wait for Next Tick]
+   │ Quiet Hours?    │
+   └────────┬────────┘
+       ┌────┴────┐
+       NO       YES
+       │         │
+       ▼         ▼
+┌──────────────┐ ┌───────────────┐
+│ Send Desktop │ │ Suppress Alert│
+│ Notification │ └───────────────┘
+└──────────────┘
+```
+
+---
+
+## 3. Complete TypeScript Type Definitions (`src/core/types.ts`)
+
+```typescript
+export type FileChangeKind =
+  | 'modified'
+  | 'staged'
+  | 'untracked'
+  | 'deleted'
+  | 'renamed'
+  | 'conflicted';
+
+export interface GitFileStatus {
+  path: string;
+  kind: FileChangeKind;
+  staged: boolean;
+  rawStatus: string;
+}
+
+export interface GitRepoSummary {
+  modified: number;
+  untracked: number;
+  staged: number;
+  deleted: number;
+  total: number;
+}
+
+export interface GitRepoState {
+  isGitRepo: boolean;
+  rootPath: string;
+  name: string;
+  branch: string;
+  isDirty: boolean;
+  files: GitFileStatus[];
+  summary: GitRepoSummary;
+  lastCommitTime: Date | null;
+  lastCommitRelative: string;
+  lastCommitHash: string;
+  lastCommitMessage: string;
+  firstDirtyTime?: Date | null;
+  firstDirtyRelative?: string;
+  error?: string;
+}
+
+export interface CommitOptions {
+  files?: string[];
+  message: string;
+  repoPath?: string;
+}
+
+export interface CommitResult {
+  success: boolean;
+  hash?: string;
+  message?: string;
+  commitHash?: string;
+  commitMessage?: string;
+  filesCommitted?: number;
+  relativeTime?: string;
+  error?: string;
+}
+
+export interface WatchedRepoConfig {
+  path: string;
+  name: string;
+  addedAt: string;
+  lastNotifiedAt?: string;
+  lastSeenDirtyAt?: string;
+  lastFileCount?: number;
+}
+
+export interface QuietHoursConfig {
+  enabled: boolean;
+  start: string; // "HH:MM" 24h format, e.g. "23:00"
+  end: string;   // "HH:MM" 24h format, e.g. "08:00"
+}
+
+export interface GitRemindConfig {
+  version: number;
+  intervalMinutes: number;
+  notifyOnClose: boolean;
+  sound: boolean;
+  language: 'en' | 'tr';
+  watchedRepos: WatchedRepoConfig[];
+  ignorePatterns: string[];
+  ideProcesses: string[];
+  quietHours: QuietHoursConfig;
+}
+
+export type NotificationTrigger = 'interval' | 'close' | 'idle' | 'manual' | 'test';
+
+export interface NotificationPayload {
+  trigger: NotificationTrigger;
+  title: string;
+  subtitle?: string;
+  message: string;
+  repoName?: string;
+  repoPath?: string;
+  branch?: string;
+  fileCount?: number;
+  filesPreview?: string[];
+}
+
+export interface DaemonStatus {
+  running: boolean;
+  pid?: number;
+  startedAt?: string;
+  uptimeSeconds?: number;
+  watchedCount: number;
+  dirtyCount: number;
+}
+```
+
+---
+
+## 4. Module-by-Module Internal Reference
+
+### `src/core/git.ts` — Git Engine & Porcelain Parsing
+Executes non-blocking Git commands via `child_process.execFile` with 8000ms timeout and `windowsHide: true`.
+- `runGit(args: string[], cwd: string): Promise<string>`: Low-level child process wrapper.
+- `isGitRepository(dir: string): Promise<boolean>`: Executes `git rev-parse --is-inside-work-tree`.
+- `getRepoRoot(dir: string): Promise<string | null>`: Executes `git rev-parse --show-toplevel`.
+- `parsePorcelainLine(line: string): GitFileStatus | null`:
+  - Parses 2-character XY status codes from `git status --porcelain=v1 -uall`.
+  - `??` -> untracked (`kind: untracked`, `staged: false`).
+  - ` M` -> modified unstaged (`kind: modified`, `staged: false`).
+  - `M ` -> modified staged (`kind: staged`, `staged: true`).
+  - `A ` -> added staged (`kind: staged`, `staged: true`).
+  - ` D` / `D ` -> deleted (`kind: deleted`).
+  - `R ` -> renamed (`kind: renamed`, handles `old -> new` path resolution).
+  - `UU`, `AA`, `DD` -> merge conflict (`kind: conflicted`).
+- `getRepoState(repoPath: string): Promise<GitRepoState>`:
+  - Resolves branch via `git rev-parse --abbrev-ref HEAD`.
+  - Parses dirty file list and computes `GitRepoSummary`.
+  - Extracts last commit hash, relative time, and message via `git log -1 --format=%H|%cr|%ct|%s`.
+- `stageAll(repoPath: string): Promise<string>`: Runs `git add -A`.
+- `stageFiles(repoPath: string, files: string[]): Promise<string>`: Runs `git add -- <files...>`.
+- `commitChanges(options: CommitOptions): Promise<CommitResult>`: Commits changes, parses output hash, and verifies clean tree.
+- `formatTimeAgo(date: Date): string`: Formats human-readable relative time string.
+
+### `src/core/watcher.ts` — Real-Time FSWatcher & Timing Engine
+- `RepoWatcher` class:
+  - Instantiates `chokidar.watch()` with configured ignore patterns (`**/node_modules/**`, `**/.git/**`, `**/dist/**`, etc.).
+  - Configures `awaitWriteFinish` with 1000ms stability threshold and 200ms poll interval.
+  - Implements `queueEvaluation()` with a 2500ms debounce timer to coalesce file system burst events.
+  - Runs a 60-second periodic timer checking:
+    ```typescript
+    const baseline = this.lastNotifiedAt?.getTime() ?? this.firstDirtyAt?.getTime();
+    if (Date.now() - baseline >= intervalMs) {
+      // dispatch notification & update lastNotifiedAt
+    }
+    ```
+  - Emits clean state transitions when working tree becomes clean, clearing `firstDirtyAt` and `lastNotifiedAt`.
+
+### `src/core/daemon.ts` — Background Process Supervisor
+- `GitRemindDaemon` class:
+  - `static isRunning(): { running: boolean; pid?: number }`: Checks existence of PID file at `~/.gitremind/gitremind.pid` and verifies process vitality using `process.kill(pid, 0)`.
+  - `static spawnBackground(entryPath: string)`:
+    - Spawns detached Node process: `spawn(process.execPath, [entryPath, 'daemon', 'run'], { detached: true, stdio: ['ignore', fd, fd], windowsHide: true })`.
+    - Unrefs child process handle allowing parent process to terminate cleanly.
+  - `start(): Promise<void>`:
+    - Writes PID to `gitremind.pid`.
+    - Registers signal listeners (`SIGINT`, `SIGTERM`, `exit`) for atomic PID cleanup.
+    - Synchronizes repository watchers via `syncWatchers()` every 10 seconds.
+  - `syncWatchers()`: Reconciles active `RepoWatcher` instances against configured `watchedRepos` dynamically without restarting daemon.
+
+### `src/core/notifier.ts` — Native Cross-Platform Notifications
+- `Notifier` class:
+  - Windows: Executes `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/win-toast.ps1 -Title ... -Subtitle ... -Message ... [-Sound]` using the native WinRT `Windows.UI.Notifications.ToastNotification` XML API.
+  - macOS: Executes AppleScript via `osascript -e 'display notification ...'`.
+  - Linux: Executes `notify-send`.
+  - `isQuietHour(config: GitRemindConfig): boolean`: Evaluates whether current system time falls between `config.quietHours.start` and `config.quietHours.end` (supporting overnight midnight crossing, e.g. 23:00 to 08:00).
+  - `formatMessage(payload, config)`: Formats localized titles, headers, and previews in English or Turkish.
+
+### `src/core/process-tracker.ts` — IDE & Process Exit Detection
+- `ProcessTracker` class:
+  - `isProcessAlive(pid: number): boolean`: Polls process survival via `process.kill(pid, 0)`.
+  - `runSession(editorCommand: string, args: string[], repoPath: string): Promise<number>`:
+    - Spawns editor child process with inherited stdio (`spawn(editorCommand, args, { cwd: repoPath, stdio: 'inherit', shell: true })`).
+    - When child exits, immediately evaluates `getRepoState(repoPath)`.
+    - If `state.isDirty === true`, triggers `trigger: 'close'` desktop notification and displays console alert banner.
+
+### `src/cli/tui.ts` — Retro ANSI Terminal UI Library
+- `renderBox(options)`: Renders Unicode rounded-corner boxes (`╭─`, `─╮`, `│`, `╰─`, `─╯`) with ANSI-safe width calculation.
+- `pad(str, targetWidth, align)`: Pads strings respecting ANSI formatting escape codes.
+- `stripAnsi(str)`: Removes ANSI control codes for exact visual length measurement.
+- `formatBadge(kind)`: Returns color-coded status badges: `[M]` (yellow), `[A]` (cyan), `[?]` (green), `[D]` (red), `[!]` (bgRed).
+- `formatDaemonPill(running, pid)`: Returns `🟢 Active [PID: x]` or `🔴 Stopped`.
+- `formatStatusPill(isDirty, count)`: Returns `🟡 Dirty (x uncommitted files)` or `🟢 Clean`.
+- `renderActionBar(actions)`: Formats keyboard hotkey navigation strip.
+
+### `src/cli/commit-wizard.ts` — Conventional Commit Wizard
+- `runCommitWizard(targetPath?: string)`:
+  - Inspects dirty files and presents categorized preview.
+  - Prompts for commit type:
+    1. `feat`: New feature
+    2. `fix`: Bug fix
+    3. `docs`: Documentation
+    4. `refactor`: Refactoring
+    5. `perf`: Performance
+    6. `test`: Tests
+    7. `chore`: Tooling/maintenance
+    8. `custom`: Custom prefix
+  - Prompts for optional scope (e.g. `auth`, `ui`, `core`).
+  - Prompts for commit subject message.
+  - Shows preview box: `type(scope): message`.
+  - Confirms and invokes `commitChanges()` with automatic staging.
+
+### `src/cli/dashboard.ts` — Interactive TUI Loop (`DashboardApp`)
+- Full interactive terminal dashboard application.
+- Sets `process.stdin.setRawMode(true)` to capture single keystrokes without Enter:
+  - `↑` / `↓` / `k` / `j`: Navigate watched repository list.
+  - `c`: Launch Conventional Commit wizard.
+  - `w`: Add current directory to watch list.
+  - `u`: Remove selected repository from watch list.
+  - `s`: Toggle daemon process (start/stop).
+  - `n`: Fire test notification.
+  - `r`: Force instant git refresh.
+  - `q` / `Ctrl+C`: Gracefully exit dashboard.
+- Auto-refreshes every 4 seconds. Non-TTY environments exit cleanly after printing a snapshot.
+
+---
+
+## 5. Storage & File Locations
+
+- **Configuration File**:
+  - Windows: `%USERPROFILE%\.gitremind\config.json`
+  - macOS/Linux: `~/.gitremind/config.json`
+- **PID File**:
+  - Windows: `%USERPROFILE%\.gitremind\gitremind.pid`
+  - macOS/Linux: `~/.gitremind/gitremind.pid`
+- **Daemon Log File**:
+  - Windows: `%USERPROFILE%\.gitremind\daemon.log`
+  - macOS/Linux: `~/.gitremind/daemon.log`
+
+---
+
+## 6. Programmatic TypeScript API Usage
+
+```typescript
+import {
+  getRepoState,
+  isGitRepository,
+  stageAll,
+  commitChanges,
+  GitRemindDaemon,
+  RepoWatcher,
+  notifier,
+  configManager
+} from 'gitremind';
+
+// 1. Inspect repository state
+const state = await getRepoState('./my-project');
+console.log(`Repository: ${state.name} (${state.branch})`);
+console.log(`Dirty: ${state.isDirty}, Files: ${state.summary.total}`);
+
+for (const file of state.files) {
+  console.log(` ${file.kind.toUpperCase()} - ${file.path} (staged: ${file.staged})`);
+}
+
+// 2. Add repo to configuration
+await configManager.addRepo('./my-project');
+
+// 3. Start background watcher programmatically
+const config = configManager.load();
+const watcher = new RepoWatcher('./my-project', config);
+await watcher.start();
+
+// 4. Dispatch custom notification
+await notifier.notify({
+  trigger: 'interval',
+  title: 'Git Snapshot Reminder',
+  message: 'You have uncommitted modifications in payment-service.',
+  repoName: 'payment-service',
+  branch: 'main',
+  fileCount: 3,
+  filesPreview: ['server.ts', 'routes.ts']
+});
+
+// 5. Stage and commit changes
+const result = await commitChanges({
+  repoPath: './my-project',
+  message: 'feat(api): add stripe billing webhook'
+});
+console.log(`Committed: ${result.commitHash}`);
+```
+
+---
+
+## 7. Shell Exit Integration Mechanics
+
+### PowerShell Engine Event
+Registers for the `PowerShell.Exiting` engine event. Executes inside the exiting session before socket tear down:
+```powershell
+Register-EngineEvent PowerShell.Exiting -Action {
+    try {
+        if (git rev-parse --is-inside-work-tree 2>$null) {
+            $dirty = git status --porcelain=v1 2>$null
+            if ($dirty) {
+                Write-Host "`n[GitRemind] ⚠️  WARNING: Uncommitted changes detected before terminal exit!" -ForegroundColor Yellow
+                git status -s
+                gitremind check 2>$null
+            }
+        }
+    } catch {}
+} | Out-Null
+```
+
+### POSIX Shells (Bash & Zsh)
+Leverages the POSIX `trap <handler> EXIT` signal:
+```bash
+gitremind_exit_hook() {
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        if [ -n "$(git status --porcelain=v1 2>/dev/null)" ]; then
+            printf "\n\033[1;33m[GitRemind] ⚠️  WARNING: Uncommitted changes detected before exit!\033[0m\n"
+            git status -s
+            gitremind check >/dev/null 2>&1 &
+        fi
+    fi
+}
+trap gitremind_exit_hook EXIT
+```

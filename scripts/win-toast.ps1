@@ -1,6 +1,6 @@
 param(
     [string]$Title = "GitRemind",
-    [string]$Message = "Commit edilmemis degisiklikleriniz bulunuyor!",
+    [string]$Message = "You have uncommitted changes in your repository!",
     [string]$Subtitle = "",
     [switch]$Sound = $true
 )
@@ -21,7 +21,6 @@ try {
         $textNodes.Item(2).AppendChild($template.CreateTextNode($Message)) | Out-Null
     } else {
         $templateType = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
-        $template = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
         $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($templateType)
         $textNodes = $template.GetElementsByTagName("text")
         $textNodes.Item(0).AppendChild($template.CreateTextNode($Title)) | Out-Null

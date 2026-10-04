@@ -4,7 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
-import { parsePorcelainLine, getRepoState, isGitRepository } from '../src/core/git.js';
+import {
+  parsePorcelainLine,
+  getRepoState,
+  isGitRepository,
+  commitChanges,
+  stageAll,
+  stageFiles,
+  generateCommitSuggestion,
+  suggestCommitMessage,
+} from '../src/core/git.js';
 
 describe('Git Parser & Inspector', () => {
   it('should parse untracked files correctly', () => {
@@ -70,6 +79,8 @@ describe('Git Parser & Inspector', () => {
       let state = await getRepoState(tmpDir);
       assert.equal(state.isGitRepo, true);
       assert.equal(state.isDirty, false);
+      assert.equal(state.lastCommitRelative, 'No commits yet');
+      assert.equal(state.lastCommitMessage, 'Waiting for initial commit');
 
       // Create a file
       fs.writeFileSync(path.join(tmpDir, 'hello.txt'), 'Hello world', 'utf8');
@@ -79,20 +90,33 @@ describe('Git Parser & Inspector', () => {
       assert.equal(state.summary.untracked, 1);
       assert.equal(state.summary.total, 1);
 
-      // Stage and commit
-      execSync('git add hello.txt', { cwd: tmpDir });
-      execSync('git commit -m "initial commit"', { cwd: tmpDir });
+      // Commit changes using commitChanges helper
+      const commitRes = await commitChanges(tmpDir, 'feat: initial commit', true);
+      assert.equal(commitRes.success, true);
+      assert.ok(commitRes.hash);
 
       state = await getRepoState(tmpDir);
       assert.equal(state.isDirty, false);
       assert.equal(state.summary.total, 0);
-      assert.equal(state.lastCommitMessage, 'initial commit');
+      assert.equal(state.lastCommitMessage, 'feat: initial commit');
 
       // Modify committed file
       fs.appendFileSync(path.join(tmpDir, 'hello.txt'), '\nsecond line');
       state = await getRepoState(tmpDir);
       assert.equal(state.isDirty, true);
       assert.equal(state.summary.modified, 1);
+
+      // Test stageAll
+      await stageAll(tmpDir);
+      state = await getRepoState(tmpDir);
+      assert.equal(state.summary.staged, 1);
+
+      // Commit staged changes without stageAll=false
+      const commit2 = await commitChanges(tmpDir, 'fix: second line added', false);
+      assert.equal(commit2.success, true);
+
+      state = await getRepoState(tmpDir);
+      assert.equal(state.isDirty, false);
     } finally {
       try {
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -100,5 +124,37 @@ describe('Git Parser & Inspector', () => {
         // ignore tmp cleanup error on windows
       }
     }
+  });
+
+  it('should generate accurate conventional commit suggestions', () => {
+    // Tests
+    const testSuggestion = generateCommitSuggestion([
+      { path: 'tests/git.test.ts', kind: 'modified', staged: false, rawStatus: ' M' },
+    ]);
+    assert.ok(testSuggestion.startsWith('test:'));
+
+    // Docs
+    const docSuggestion = generateCommitSuggestion([
+      { path: 'README.md', kind: 'modified', staged: false, rawStatus: ' M' },
+    ]);
+    assert.ok(docSuggestion.startsWith('docs:'));
+
+    // Config / Build
+    const buildSuggestion = generateCommitSuggestion([
+      { path: 'package.json', kind: 'modified', staged: false, rawStatus: ' M' },
+    ]);
+    assert.ok(buildSuggestion.startsWith('build:'));
+
+    // Styles
+    const styleSuggestion = generateCommitSuggestion([
+      { path: 'src/theme.css', kind: 'modified', staged: false, rawStatus: ' M' },
+    ]);
+    assert.ok(styleSuggestion.startsWith('style:'));
+
+    // suggestCommitMessage helper
+    const suggested = suggestCommitMessage([
+      { path: 'docs/guide.md', kind: 'modified', staged: false, rawStatus: ' M' },
+    ]);
+    assert.ok(suggested.startsWith('docs:'));
   });
 });

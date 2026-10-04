@@ -33,6 +33,25 @@ export interface GitRepoState {
   lastCommitRelative: string;
   lastCommitHash: string;
   lastCommitMessage: string;
+  firstDirtyTime?: Date | null;
+  firstDirtyRelative?: string;
+  error?: string;
+}
+
+export interface CommitOptions {
+  files?: string[];
+  message: string;
+  repoPath?: string;
+}
+
+export interface CommitResult {
+  success: boolean;
+  hash?: string;
+  message?: string;
+  commitHash?: string;
+  commitMessage?: string;
+  filesCommitted?: number;
+  relativeTime?: string;
   error?: string;
 }
 
@@ -56,7 +75,7 @@ export interface GitRemindConfig {
   intervalMinutes: number;
   notifyOnClose: boolean;
   sound: boolean;
-  language: 'tr' | 'en';
+  language: 'en' | 'tr';
   watchedRepos: WatchedRepoConfig[];
   ignorePatterns: string[];
   ideProcesses: string[];

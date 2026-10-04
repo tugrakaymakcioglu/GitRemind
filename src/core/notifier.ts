@@ -61,7 +61,7 @@ export class Notifier {
    */
   formatMessage(payload: NotificationPayload, config: GitRemindConfig): { title: string; subtitle: string; message: string } {
     const isTr = config.language === 'tr';
-    const repo = payload.repoName || 'Git Projesi';
+    const repo = payload.repoName || (isTr ? 'Git Projesi' : 'Git Project');
     const branch = payload.branch ? ` (${payload.branch})` : '';
     const fileCount = payload.fileCount ?? 0;
 
@@ -78,7 +78,7 @@ export class Notifier {
             : `⚠️ You have ${fileCount} uncommitted file(s) in "${repo}"!`;
           break;
         case 'idle':
-          title = isTr ? 'GitRemind: İşlem Bekliyor' : 'GitRemind: Inactive Project';
+          title = isTr ? 'GitRemind: İşlem Bekliyor' : 'GitRemind: Inactive Project!';
           message = isTr
             ? `⏳ "${repo}" reposunda bir süredir değişiklik commit edilmedi.`
             : `⏳ "${repo}" has pending uncommitted changes.`;
@@ -89,7 +89,7 @@ export class Notifier {
           break;
         case 'interval':
         default:
-          title = isTr ? 'GitRemind: Uncommitted Changes!' : 'GitRemind: Uncommitted Changes!';
+          title = isTr ? 'GitRemind: Değişiklikleri Commit Etmediniz!' : 'GitRemind: Uncommitted Changes!';
           message = isTr
             ? `💡 "${repo}" reposundaki son değişiklikleri commit etmediniz! (${fileCount} dosya)`
             : `💡 You haven't committed the latest changes in "${repo}"! (${fileCount} files)`;

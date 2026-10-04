@@ -10,7 +10,7 @@ const DEFAULT_CONFIG: GitRemindConfig = {
   intervalMinutes: 20,
   notifyOnClose: true,
   sound: true,
-  language: 'tr',
+  language: 'en',
   watchedRepos: [],
   ignorePatterns: [
     '**/node_modules/**',
@@ -108,7 +108,7 @@ export class ConfigManager {
   async addRepo(targetPath: string): Promise<{ success: boolean; repo?: WatchedRepoConfig; message: string }> {
     const root = await getRepoRoot(targetPath);
     if (!root) {
-      return { success: false, message: `"${targetPath}" geçerli bir Git reposu değil.` };
+      return { success: false, message: `"${targetPath}" is not a valid Git repository.` };
     }
 
     const normalized = normalizeRepoPath(root);
@@ -116,7 +116,7 @@ export class ConfigManager {
 
     const existing = config.watchedRepos.find((r) => normalizeRepoPath(r.path) === normalized);
     if (existing) {
-      return { success: false, repo: existing, message: `"${existing.name}" zaten izleme listesinde yer alıyor.` };
+      return { success: false, repo: existing, message: `"${existing.name}" is already in the watch list.` };
     }
 
     const repoName = path.basename(normalized);
@@ -128,7 +128,7 @@ export class ConfigManager {
 
     config.watchedRepos.push(newRepo);
     this.save(config);
-    return { success: true, repo: newRepo, message: `"${repoName}" (${normalized}) izleme listesine eklendi.` };
+    return { success: true, repo: newRepo, message: `"${repoName}" (${normalized}) added to watch list.` };
   }
 
   /**
@@ -144,11 +144,11 @@ export class ConfigManager {
     );
 
     if (config.watchedRepos.length === initialCount) {
-      return { success: false, message: `"${targetPath}" izleme listesinde bulunamadı.` };
+      return { success: false, message: `"${targetPath}" not found in watch list.` };
     }
 
     this.save(config);
-    return { success: true, message: `"${targetPath}" izleme listesinden çıkarıldı.` };
+    return { success: true, message: `"${targetPath}" removed from watch list.` };
   }
 
   /**

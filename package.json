@@ -1,7 +1,7 @@
 {
   "name": "gitremind",
   "version": "1.0.0",
-  "description": "Intelligent automated git reminder tool that alerts you about uncommitted changes on project close or at periodic intervals.",
+  "description": "Intelligent background Git watcher and uncommitted changes daemon with Claude CLI-style dashboard, smart commit reminders, conventional commit wizard, and cross-platform desktop notifications.",
   "type": "module",
   "bin": {
     "gitremind": "./bin/gitremind.js"
@@ -15,16 +15,40 @@
     "dev": "tsx src/cli/index.ts",
     "test": "tsx --test tests/**/*.test.ts"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gitremind/gitremind.git"
+  },
+  "homepage": "https://github.com/gitremind/gitremind#readme",
+  "bugs": {
+    "url": "https://github.com/gitremind/gitremind/issues"
+  },
   "keywords": [
     "git",
-    "reminder",
-    "notifier",
-    "commit",
+    "git-reminder",
+    "git-watcher",
+    "uncommitted-changes",
+    "uncommitted-changes-reminder",
+    "git-commit-reminder",
+    "git-daemon",
+    "git-tracker",
+    "developer-productivity",
     "developer-tools",
-    "watch",
-    "toast"
+    "cli-dashboard",
+    "conventional-commits",
+    "desktop-notifications",
+    "windows-toast",
+    "macos-notifications",
+    "linux-notifications",
+    "tui",
+    "git-status",
+    "git-workflow",
+    "code-safety"
   ],
-  "author": "",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "GitRemind Contributors",
   "license": "MIT",
   "dependencies": {
     "chokidar": "^4.0.3",
@@ -37,3 +61,4 @@
     "typescript": "^5.8.2"
   }
 }
+

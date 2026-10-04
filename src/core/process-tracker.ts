@@ -75,9 +75,9 @@ export class ProcessTracker {
         logger.info(`Project ${state.name} closed with uncommitted changes! Sending reminder.`);
         await notifier.notify({
           trigger: 'close',
-          title: 'GitRemind: Proje Kapatıldı!',
+          title: 'GitRemind: Project Closed!',
           subtitle: `Repo: ${state.name} (${state.branch})`,
-          message: `⚠️ Projeyi kapattınız fakat ${state.summary.total} dosya commit edilmedi!`,
+          message: `⚠️ Project closed but ${state.summary.total} uncommitted file(s) remain!`,
           repoName: state.name,
           repoPath: state.rootPath,
           branch: state.branch,
@@ -112,9 +112,9 @@ export class ProcessTracker {
         if (state.isDirty) {
           await notifier.notify({
             trigger: 'close',
-            title: 'GitRemind: Proje Kapatıldı!',
+            title: 'GitRemind: Project Closed!',
             subtitle: `Repo: ${state.name} (${state.branch})`,
-            message: `⚠️ Projeyi kapattınız fakat ${state.summary.total} dosya commit edilmedi!`,
+            message: `⚠️ Project closed but ${state.summary.total} uncommitted file(s) remain!`,
             repoName: state.name,
             repoPath: state.rootPath,
             branch: state.branch,
@@ -123,9 +123,9 @@ export class ProcessTracker {
           });
 
           console.log('\n\x1b[33m%s\x1b[0m', '═══════════════════════════════════════════════════════');
-          console.log('\x1b[1;33m%s\x1b[0m', ' ⚠️  GitRemind Hatırlatması: Değişiklikler Commit Edilmedi!');
-          console.log('\x1b[33m%s\x1b[0m', ` Repo: ${state.name} | Dal: ${state.branch}`);
-          console.log('\x1b[33m%s\x1b[0m', ` Değiştirilen Dosya Sayısı: ${state.summary.total}`);
+          console.log('\x1b[1;33m%s\x1b[0m', ' ⚠️  GitRemind Reminder: Uncommitted Changes Detected!');
+          console.log('\x1b[33m%s\x1b[0m', ` Repo: ${state.name} | Branch: ${state.branch}`);
+          console.log('\x1b[33m%s\x1b[0m', ` Modified Files Count: ${state.summary.total}`);
           console.log('\x1b[33m%s\x1b[0m', '═══════════════════════════════════════════════════════\n');
         }
 

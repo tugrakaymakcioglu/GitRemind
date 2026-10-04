@@ -61,7 +61,7 @@ export class GitRemindDaemon {
       return {
         success: false,
         pid: current.pid,
-        message: `GitRemind arkaplan servisi zaten çalışıyor (PID: ${current.pid}).`,
+        message: `GitRemind background service is already running (PID: ${current.pid}).`,
       };
     }
 
@@ -80,13 +80,13 @@ export class GitRemindDaemon {
       return {
         success: true,
         pid: child.pid,
-        message: `GitRemind servisi arkaplanda başlatıldı (PID: ${child.pid}).`,
+        message: `GitRemind service started in background (PID: ${child.pid}).`,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
         success: false,
-        message: `Servis başlatılamadı: ${msg}`,
+        message: `Failed to start service: ${msg}`,
       };
     }
   }

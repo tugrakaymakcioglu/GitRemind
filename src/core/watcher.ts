@@ -150,15 +150,12 @@ export class RepoWatcher {
       logger.info(`Interval threshold (${this.config.intervalMinutes}m) reached for dirty repo "${this.currentState.name}". Sending reminder.`);
       
       const fileNames = this.currentState.files.map((f) => f.path);
-      const isTurkish = this.config.language === 'tr';
 
       await notifier.notify({
         trigger: 'interval',
-        title: isTurkish ? 'GitRemind: Değişiklikleri Commit Etmediniz!' : 'GitRemind: Uncommitted Changes!',
+        title: 'GitRemind: Uncommitted Changes!',
         subtitle: `Repo: ${this.currentState.name} (${this.currentState.branch})`,
-        message: isTurkish
-          ? `💡 "${this.currentState.name}" reposundaki ${this.currentState.summary.total} dosya bekliyor. Son commit: ${this.currentState.lastCommitRelative}`
-          : `💡 ${this.currentState.summary.total} files waiting in "${this.currentState.name}". Last commit: ${this.currentState.lastCommitRelative}`,
+        message: `💡 ${this.currentState.summary.total} uncommitted file(s) waiting in "${this.currentState.name}". Last commit: ${this.currentState.lastCommitRelative}`,
         repoName: this.currentState.name,
         repoPath: this.currentState.rootPath,
         branch: this.currentState.branch,
@@ -182,11 +179,11 @@ export class RepoWatcher {
       const fileNames = state.files.map((f) => f.path);
       await notifier.notify({
         trigger: 'manual',
-        title: 'GitRemind: Durum Raporu',
+        title: 'GitRemind: Status Report',
         subtitle: `Repo: ${state.name} (${state.branch})`,
         message: state.isDirty
-          ? `⚠️ Commit edilmemiş ${state.summary.total} dosya var.`
-          : '✅ Tüm değişiklikler commit edilmiş. Çalışma alanı temiz.',
+          ? `⚠️ You have ${state.summary.total} uncommitted file(s).`
+          : '✅ All changes committed. Working tree clean.',
         repoName: state.name,
         repoPath: state.rootPath,
         branch: state.branch,

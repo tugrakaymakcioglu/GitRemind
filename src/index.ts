@@ -7,3 +7,7 @@ export * from './core/daemon.js';
 export * from './core/process-tracker.js';
 export * from './utils/paths.js';
 export * from './utils/logger.js';
+export * from './cli/dashboard.js';
+export * from './cli/commit-wizard.js';
+export * from './cli/tui.js';
+
