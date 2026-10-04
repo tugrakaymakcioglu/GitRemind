@@ -1,0 +1,39 @@
+{
+  "name": "gitremind",
+  "version": "1.0.0",
+  "description": "Intelligent automated git reminder tool that alerts you about uncommitted changes on project close or at periodic intervals.",
+  "type": "module",
+  "bin": {
+    "gitremind": "./bin/gitremind.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/cli/index.js",
+    "dev": "tsx src/cli/index.ts",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "keywords": [
+    "git",
+    "reminder",
+    "notifier",
+    "commit",
+    "developer-tools",
+    "watch",
+    "toast"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "commander": "^13.1.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
