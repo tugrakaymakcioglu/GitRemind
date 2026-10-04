@@ -4,41 +4,66 @@ import fs from 'node:fs';
 import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import pc from 'picocolors';
-import { getRepoState, getRepoRoot } from '../core/git.js';
+import {
+  getRepoState,
+  getRepoRoot,
+  getRecentCommits,
+  getUpstreamStatus,
+  CommitHistoryItem,
+  UpstreamStatus,
+} from '../core/git.js';
 import { configManager } from '../core/config.js';
 import { GitRemindDaemon } from '../core/daemon.js';
 import { notifier } from '../core/notifier.js';
-import { GitRepoState, WatchedRepoConfig } from '../core/types.js';
+import { GitRepoState } from '../core/types.js';
 import { normalizeRepoPath } from '../utils/paths.js';
 import {
   clearScreen,
   hideCursor,
   showCursor,
-  renderHeader,
+  enterAlternateScreen,
+  leaveAlternateScreen,
+  writeFrame,
   renderBox,
-  renderActionBar,
+  renderDualPaneBox,
+  renderTelemetryBar,
   formatBadge,
   formatDaemonPill,
   formatStatusPill,
   visibleLength,
   pad,
+  truncate,
+  SPINNER_FRAMES,
+  PULSE_FRAMES,
 } from './tui.js';
 import { runCommitWizard } from './commit-wizard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+interface CachedRepoExtra {
+  recentCommits: CommitHistoryItem[];
+  upstream: UpstreamStatus;
+}
+
 export class DashboardApp {
   private selectedIndex = 0;
   private repos: GitRepoState[] = [];
+  private repoExtras = new Map<string, CachedRepoExtra>();
   private flashMessage = '';
   private flashTimer: NodeJS.Timeout | null = null;
-  private refreshTimer: NodeJS.Timeout | null = null;
+  private pollTimer: NodeJS.Timeout | null = null;
+  private animTimer: NodeJS.Timeout | null = null;
   private isRunning = false;
   private isInteracting = false;
   private autoRefreshSeconds = 4;
+  private nextPollTimestamp = Date.now() + 4000;
   private userNavigated = false;
   private currentCwdRoot: string | null = null;
+
+  // Animation frame indices
+  private spinnerIndex = 0;
+  private pulseIndex = 0;
 
   /**
    * Resolves entry script path for background daemon
@@ -65,7 +90,7 @@ export class DashboardApp {
     this.flashTimer = setTimeout(() => {
       this.flashMessage = '';
       if (this.isRunning && !this.isInteracting) {
-        this.render();
+        this.renderFrame();
       }
     }, timeoutMs);
   }
@@ -88,7 +113,7 @@ export class DashboardApp {
         const addResult = await configManager.addRepo(normalizedCurrent);
         if (addResult.success) {
           this.setFlash(
-            pc.green(`⚡ Auto-detected Git repo! Enrolled "${path.basename(normalizedCurrent)}" into GitRemind.`),
+            pc.green(`⚡ Auto-enrolled "${path.basename(normalizedCurrent)}" into GitRemind.`),
             4500
           );
         }
@@ -104,6 +129,13 @@ export class DashboardApp {
         try {
           const state = await getRepoState(w.path);
           loadedStates.push(state);
+
+          // Fetch extra git telemetry (recent commits & upstream status)
+          const [recentCommits, upstream] = await Promise.all([
+            getRecentCommits(w.path, 3),
+            getUpstreamStatus(w.path),
+          ]);
+          this.repoExtras.set(w.path, { recentCommits, upstream });
         } catch {
           // ignore corrupted or unreadable path
         }
@@ -112,7 +144,7 @@ export class DashboardApp {
 
     this.repos = loadedStates;
 
-    // 3. Focus active repository: if standing in a git repo, auto-focus it
+    // 3. Focus active repository: if standing in a git repo, auto-focus it on initial start
     if (this.currentCwdRoot && !this.userNavigated) {
       const normCurrent = normalizeRepoPath(this.currentCwdRoot).toLowerCase();
       const currentIdx = this.repos.findIndex(
@@ -127,167 +159,347 @@ export class DashboardApp {
     if (this.selectedIndex >= this.repos.length) {
       this.selectedIndex = Math.max(0, this.repos.length - 1);
     }
+
+    this.nextPollTimestamp = Date.now() + this.autoRefreshSeconds * 1000;
   }
 
   /**
-   * Renders the complete dashboard to the terminal
+   * Generates the signature cyberpunk top bar
    */
-  public render(): void {
-    if (this.isInteracting) return;
+  private buildTopBar(termWidth: number, daemonRunning: boolean, daemonPid?: number): string[] {
+    const w = termWidth;
+    const pulseChar = PULSE_FRAMES[this.pulseIndex % PULSE_FRAMES.length];
+    const spinnerChar = SPINNER_FRAMES[this.spinnerIndex % SPINNER_FRAMES.length];
 
-    const termWidth = Math.min(Math.max(process.stdout.columns || 80, 80), 96);
-    const innerWidth = termWidth - 4;
-    const daemonInfo = GitRemindDaemon.isRunning();
-    const config = configManager.load();
+    const now = new Date();
+    const timeStr = [
+      String(now.getHours()).padStart(2, '0'),
+      String(now.getMinutes()).padStart(2, '0'),
+      String(now.getSeconds()).padStart(2, '0'),
+    ].join(':');
 
-    clearScreen();
+    const countdownSec = Math.max(0, Math.ceil((this.nextPollTimestamp - Date.now()) / 1000));
 
-    // 1. Header Banner
-    console.log(renderHeader(termWidth));
-    console.log('');
+    // Brand tag
+    const brand = `${pc.bold(pc.bgCyan(pc.black(' GitRemind ')))} ${pc.bold(pc.cyan('v1.0.0'))}`;
+    const brandInnerW = 20;
 
-    // 2. Live Status Box
+    // Daemon pill
+    const daemonTag = daemonRunning
+      ? `${pc.bold(pc.green(pulseChar))} ${pc.bold(pc.white('DAEMON ACTIVE'))} ${pc.dim(`(${daemonPid || 'auto'})`)}`
+      : `${pc.red('○')} ${pc.dim('DAEMON STOPPED')}`;
+
     const dirtyCount = this.repos.filter((r) => r.isDirty).length;
-    const quietStr = config.quietHours.enabled
-      ? `${config.quietHours.start}-${config.quietHours.end}`
-      : 'Disabled';
+    const summaryTag = dirtyCount > 0
+      ? `${pc.bold(pc.yellow(`▲ ${dirtyCount}/${this.repos.length} Dirty`))}`
+      : `${pc.bold(pc.green(`● ${this.repos.length} Clean`))}`;
 
-    const statusLine1 = `  Daemon       : ${formatDaemonPill(daemonInfo.running, daemonInfo.pid)}      Watch Interval : ${pc.cyan(`${config.intervalMinutes} min`)}`;
-    const statusLine2 = `  Watched Repos: ${pc.bold(pc.white(String(config.watchedRepos.length)))} (${dirtyCount > 0 ? pc.yellow(`${dirtyCount} dirty`) : pc.green('all clean')})     Quiet Hours    : ${pc.dim(quietStr)}`;
+    const clockTag = `${pc.cyan(spinnerChar)} ${pc.dim(`${countdownSec}s`)} │ ${pc.bold(pc.white(timeStr))}`;
 
-    console.log(
-      renderBox({
-        title: 'Live System Status',
-        lines: [statusLine1, statusLine2],
-        width: termWidth,
-        borderColor: pc.cyan,
-      })
-    );
-    console.log('');
+    const leftPart = `╭─ ${brand} ─╮  ${daemonTag}  │  ${summaryTag}`;
+    const rightPart = `${clockTag} ─╮`;
 
-    // 3. Repositories List Box
-    const repoLines: string[] = [];
-    if (this.repos.length === 0) {
-      repoLines.push(pc.gray('  No git repositories found. Navigate to a Git repo to auto-enroll, or press [w].'));
+    const leftLen = visibleLength(leftPart);
+    const rightLen = visibleLength(rightPart);
+    const available = w - leftLen - rightLen;
+
+    let topBorder: string;
+    if (available >= 2) {
+      topBorder = leftPart + ' ' + pc.cyan('─'.repeat(available - 2)) + ' ' + rightPart;
     } else {
-      this.repos.forEach((repo, idx) => {
-        const isSelected = idx === this.selectedIndex;
-        const isCurrent = this.currentCwdRoot &&
-          normalizeRepoPath(repo.rootPath).toLowerCase() === normalizeRepoPath(this.currentCwdRoot).toLowerCase();
-
-        const pointer = isSelected ? pc.bold(pc.cyan('▸ ')) : '  ';
-        const num = pc.gray(`[${idx + 1}] `);
-
-        const currentTag = isCurrent ? pc.cyan('★ ') : '';
-        const rawName = currentTag + repo.name;
-        const nameStr = isSelected
-          ? pc.bold(pc.white(rawName.padEnd(20)))
-          : pc.white(rawName.padEnd(20));
-
-        const branchStr = pc.magenta(`(${repo.branch || 'HEAD'})`.padEnd(16));
-        const pill = formatStatusPill(repo.isDirty, repo.summary.total);
-
-        repoLines.push(`${pointer}${num}${nameStr} ${branchStr} ${pill}`);
-      });
+      topBorder = leftPart + '  ' + rightPart;
     }
 
-    console.log(
-      renderBox({
-        title: `Watched Repositories (${this.repos.length}) [Navigate: ↑ / ↓]`,
-        lines: repoLines,
-        width: termWidth,
-        borderColor: pc.blue,
-      })
-    );
-    console.log('');
+    const subRemaining = Math.max(2, w - brandInnerW - 6);
+    const subBorder = pc.cyan('╰' + '─'.repeat(brandInnerW + 2) + '┴' + '─'.repeat(subRemaining) + '╯');
 
-    // 4. Active Repository Details Box
-    const active = this.repos[this.selectedIndex];
-    if (active) {
-      const detailsLines: string[] = [];
+    return [topBorder, subBorder];
+  }
 
-      // Truncate path safely if too long
-      const maxPathLen = Math.max(15, innerWidth - active.name.length - 22);
-      const safePath = active.rootPath.length > maxPathLen
-        ? '...' + active.rootPath.slice(-(maxPathLen - 3))
-        : active.rootPath;
+  /**
+   * Builds the left repositories navigation list
+   */
+  private buildRepoListLines(innerW: number): string[] {
+    const lines: string[] = [];
 
-      detailsLines.push(
-        `  ${pc.bold('Repository')}  : ${pc.bold(pc.cyan(active.name))}  ${pc.gray(`[${safePath}]`)}`
-      );
-      detailsLines.push(`  ${pc.bold('Branch')}      : ${pc.magenta(active.branch || 'unknown')}`);
+    if (this.repos.length === 0) {
+      lines.push(pc.gray(' No repositories watched.'));
+      lines.push(pc.dim(' Navigate to a Git project'));
+      lines.push(pc.dim(' or press [w] to watch cwd.'));
+      return lines;
+    }
 
-      // Safe commit message truncation so box right border never overflows
-      const maxMsgLen = Math.max(15, innerWidth - 36);
-      const safeMsg = active.lastCommitMessage
-        ? (active.lastCommitMessage.length > maxMsgLen
-            ? active.lastCommitMessage.slice(0, maxMsgLen - 3) + '...'
-            : active.lastCommitMessage)
-        : 'Waiting for initial commit';
+    this.repos.forEach((repo, idx) => {
+      const isSelected = idx === this.selectedIndex;
+      const isCurrent =
+        this.currentCwdRoot &&
+        normalizeRepoPath(repo.rootPath).toLowerCase() === normalizeRepoPath(this.currentCwdRoot).toLowerCase();
 
-      const lastCommitText = active.lastCommitHash
-        ? `${pc.yellow(active.lastCommitHash)} ${pc.white(`"${safeMsg}"`)} ${pc.dim(`(${active.lastCommitRelative})`)}`
-        : pc.dim(active.lastCommitRelative || 'No commits yet');
+      const numBadge = pc.dim(`[${idx + 1}]`);
+      const star = isCurrent ? pc.cyan('★ ') : '';
+      const rawName = `${star}${repo.name}`;
+      const nameTrunc = truncate(rawName, innerW - 10);
 
-      detailsLines.push(`  ${pc.bold('Last Commit')} : ${lastCommitText}`);
+      const statusBadge = repo.isDirty
+        ? pc.bold(pc.yellow(`▲ ${repo.summary.total}`))
+        : pc.green('● clean');
 
-      if (active.isDirty) {
-        const firstChangeStr = active.firstDirtyRelative
-          ? pc.yellow(`${active.firstDirtyRelative}`)
-          : pc.dim('Recently');
-        detailsLines.push(`  ${pc.bold('Uncommitted')} : ${pc.bold(pc.yellow(`Active for ${firstChangeStr}`))}`);
-        detailsLines.push(
-          `  ${pc.bold('Summary')}     : ${pc.yellow(`${active.summary.modified} modified`)}, ${pc.green(`${active.summary.untracked} untracked`)}, ${pc.cyan(`${active.summary.staged} staged`)}, ${pc.red(`${active.summary.deleted} deleted`)}`
-        );
-        detailsLines.push('');
-        detailsLines.push(pc.bold('  Pending Changed Files:'));
+      const branchStr = pc.magenta(`⎇ ${truncate(repo.branch || 'HEAD', 10)}`);
 
-        const previewFiles = active.files.slice(0, 7);
-        for (const file of previewFiles) {
-          const badge = formatBadge(file.kind);
-          const stagedMark = file.staged ? pc.green(' [staged]') : '';
-          detailsLines.push(`    ${badge}  ${file.path}${stagedMark}`);
-        }
-        if (active.files.length > 7) {
-          detailsLines.push(pc.dim(`    ... and ${active.files.length - 7} more files`));
-        }
+      if (isSelected) {
+        // High-visibility glowing selection row
+        const titleRow = `${pc.bold(pc.cyan('▸ █ '))} ${pc.bold(pc.white(nameTrunc))} ${numBadge}`;
+        const metaRow = `    ${branchStr} │ ${statusBadge}`;
+        lines.push(titleRow);
+        lines.push(metaRow);
       } else {
-        detailsLines.push(`  ${pc.bold('Status')}      : ${pc.green('✔  Working directory is clean. No pending changes.')}`);
+        const titleRow = `  · ${pc.white(nameTrunc)} ${numBadge}`;
+        const metaRow = `    ${pc.dim(branchStr)} │ ${statusBadge}`;
+        lines.push(titleRow);
+        lines.push(metaRow);
       }
 
-      console.log(
+      if (idx < this.repos.length - 1) {
+        lines.push(pc.dim('  ' + '─'.repeat(Math.max(4, innerW - 4))));
+      }
+    });
+
+    return lines;
+  }
+
+  /**
+   * Builds the right repository telemetry & inspector panel
+   */
+  private buildInspectorLines(innerW: number): string[] {
+    const lines: string[] = [];
+    const active = this.repos[this.selectedIndex];
+
+    if (!active) {
+      lines.push(pc.gray(' No repository selected.'));
+      return lines;
+    }
+
+    const extra = this.repoExtras.get(active.rootPath) || {
+      recentCommits: [],
+      upstream: { ahead: 0, behind: 0, upstream: '' },
+    };
+
+    // 1. Repo header & location
+    const safePath = truncate(active.rootPath, innerW - 8);
+    lines.push(`${pc.bold('Path   :')} ${pc.dim(safePath)}`);
+
+    let upstreamInfo = pc.dim('(local only)');
+    if (extra.upstream.upstream) {
+      if (extra.upstream.ahead === 0 && extra.upstream.behind === 0) {
+        upstreamInfo = pc.green(`synced with ${extra.upstream.upstream}`);
+      } else {
+        const aheadStr = extra.upstream.ahead > 0 ? pc.cyan(`↑${extra.upstream.ahead} `) : '';
+        const behindStr = extra.upstream.behind > 0 ? pc.red(`↓${extra.upstream.behind}`) : '';
+        upstreamInfo = `${aheadStr}${behindStr} (${extra.upstream.upstream})`;
+      }
+    }
+
+    lines.push(
+      `${pc.bold('Branch :')} ${pc.magenta(`⎇ ${active.branch}`)}  ${pc.dim('│')}  ${pc.bold('Upstream:')} ${upstreamInfo}`
+    );
+
+    lines.push(pc.dim('─'.repeat(innerW)));
+
+    // 2. Visual Telemetry Bar & Breakdown
+    const barWidth = Math.max(12, Math.min(26, innerW - 28));
+    const telemetryBar = renderTelemetryBar(active.summary, barWidth);
+    lines.push(`${pc.bold('Telemetry :')} ${telemetryBar}`);
+
+    const badgeStaged = pc.cyan(`● ${active.summary.staged} Staged`);
+    const badgeModified = pc.yellow(`▲ ${active.summary.modified} Modified`);
+    const badgeUntracked = pc.green(`+ ${active.summary.untracked} Untracked`);
+    const badgeDeleted = pc.red(`✖ ${active.summary.deleted} Deleted`);
+    lines.push(`            ${badgeStaged}  │  ${badgeModified}  │  ${badgeUntracked}  │  ${badgeDeleted}`);
+
+    lines.push(pc.dim('─'.repeat(innerW)));
+
+    // 3. Uncommitted Changes List
+    if (active.isDirty) {
+      const activeAge = active.firstDirtyRelative ? ` (active for ${active.firstDirtyRelative})` : '';
+      lines.push(
+        `${pc.bold(pc.yellow('Uncommitted Files'))} ${pc.dim(`[${active.files.length} total]${activeAge}`)}:`
+      );
+
+      const maxFileRows = 5;
+      const visibleFiles = active.files.slice(0, maxFileRows);
+      for (const file of visibleFiles) {
+        const badge = formatBadge(file.kind);
+        const stagedTag = file.staged ? pc.green(' [staged]') : '';
+        const filePath = truncate(file.path, innerW - 12);
+        lines.push(`  ${badge} ${pc.white(filePath)}${stagedTag}`);
+      }
+
+      if (active.files.length > maxFileRows) {
+        lines.push(pc.dim(`  ... and ${active.files.length - maxFileRows} more files`));
+      }
+    } else {
+      lines.push(`${pc.bold('Status    :')} ${pc.green('✔ Clean working tree. Everything is committed.')}`);
+    }
+
+    lines.push(pc.dim('─'.repeat(innerW)));
+
+    // 4. Recent Commits Timeline
+    lines.push(pc.bold(pc.cyan('Recent Commit Timeline:')));
+    if (extra.recentCommits.length > 0) {
+      for (const c of extra.recentCommits) {
+        const hash = pc.yellow(c.hash);
+        const rel = pc.dim(`(${c.relativeTime})`);
+        const msg = pc.white(truncate(c.message, innerW - c.hash.length - c.relativeTime.length - 8));
+        lines.push(`  ${hash} ${rel} ${msg}`);
+      }
+    } else if (active.lastCommitHash) {
+      const hash = pc.yellow(active.lastCommitHash);
+      const rel = pc.dim(`(${active.lastCommitRelative})`);
+      const msg = pc.white(truncate(active.lastCommitMessage, innerW - 20));
+      lines.push(`  ${hash} ${rel} "${msg}"`);
+    } else {
+      lines.push(pc.dim('  Waiting for initial commit'));
+    }
+
+    return lines;
+  }
+
+  /**
+   * Builds the bottom action dock and hotkey controls
+   */
+  private buildActionDock(termWidth: number): string {
+    const actions = [
+      { key: 'c', label: 'Commit' },
+      { key: 'd', label: 'Diff' },
+      { key: 'o', label: 'Editor' },
+      { key: 'w', label: 'Watch' },
+      { key: 'u', label: 'Unwatch' },
+      { key: 's', label: 'Daemon' },
+      { key: 'n', label: 'Notify' },
+      { key: 'r', label: 'Refresh' },
+      { key: 'q', label: 'Quit' },
+    ];
+
+    const innerW = termWidth - 4;
+    const parts = actions.map(
+      (a) => `${pc.bold(pc.cyan(`[${a.key}]`))} ${pc.white(a.label)}`
+    );
+
+    const singleLine = parts.join(pc.dim(' │ '));
+    if (visibleLength(singleLine) <= innerW) {
+      const hotkeyLine = pad(singleLine, innerW, 'center');
+      const topBorder = pc.cyan('╭─ Action Dock ' + '─'.repeat(Math.max(0, innerW - 13)) + '╮');
+      const content = pc.cyan('│ ') + hotkeyLine + pc.cyan(' │');
+      const bottomBorder = pc.cyan('╰' + '─'.repeat(innerW + 2) + '╯');
+      return [topBorder, content, bottomBorder].join('\n');
+    }
+
+    // 2-row layout for narrower screens so no keys are truncated
+    const row1 = pad(parts.slice(0, 5).join(pc.dim(' │ ')), innerW, 'center');
+    const row2 = pad(parts.slice(5).join(pc.dim(' │ ')), innerW, 'center');
+
+    const topBorder = pc.cyan('╭─ Action Dock ' + '─'.repeat(Math.max(0, innerW - 13)) + '╮');
+    const line1 = pc.cyan('│ ') + row1 + pc.cyan(' │');
+    const line2 = pc.cyan('│ ') + row2 + pc.cyan(' │');
+    const bottomBorder = pc.cyan('╰' + '─'.repeat(innerW + 2) + '╯');
+
+    return [topBorder, line1, line2, bottomBorder].join('\n');
+  }
+
+  /**
+   * Builds complete frame buffer and writes atomically to terminal
+   */
+  public renderFrame(): void {
+    if (this.isInteracting) return;
+
+    const termCols = process.stdout.columns || 80;
+    const termWidth = Math.max(80, Math.min(termCols, 120));
+
+    const daemonInfo = GitRemindDaemon.isRunning();
+
+    const outputLines: string[] = [];
+
+    // 1. Signature Cyberpunk Top Bar
+    const topBarLines = this.buildTopBar(termWidth, daemonInfo.running, daemonInfo.pid);
+    outputLines.push(...topBarLines);
+    outputLines.push('');
+
+    // 2. Dual Pane Grid or Responsive Stack
+    if (termWidth >= 88) {
+      const leftW = Math.max(30, Math.min(36, Math.floor(termWidth * 0.35)));
+      const rightW = termWidth - leftW - 1;
+
+      const leftLines = this.buildRepoListLines(leftW - 4);
+      const rightLines = this.buildInspectorLines(rightW - 4);
+
+      const activeName = this.repos[this.selectedIndex]?.name || 'Inspector';
+      const dualPane = renderDualPaneBox(
+        {
+          title: `Repositories (${this.repos.length})`,
+          lines: leftLines,
+          width: leftW,
+          borderColor: pc.blue,
+        },
+        {
+          title: `Inspector: ${activeName}`,
+          lines: rightLines,
+          width: rightW,
+          borderColor: this.repos[this.selectedIndex]?.isDirty ? pc.yellow : pc.cyan,
+        }
+      );
+      outputLines.push(dualPane);
+    } else {
+      // Narrow screen fallback: stacked view
+      const leftLines = this.buildRepoListLines(termWidth - 4);
+      const rightLines = this.buildInspectorLines(termWidth - 4);
+
+      outputLines.push(
         renderBox({
-          title: `Active Repository Details: ${active.name}`,
-          lines: detailsLines,
+          title: `Repositories (${this.repos.length})`,
+          lines: leftLines,
           width: termWidth,
-          borderColor: active.isDirty ? pc.yellow : pc.green,
+          borderColor: pc.blue,
+        })
+      );
+      outputLines.push('');
+      outputLines.push(
+        renderBox({
+          title: `Inspector: ${this.repos[this.selectedIndex]?.name || 'None'}`,
+          lines: rightLines,
+          width: termWidth,
+          borderColor: pc.cyan,
         })
       );
     }
-    console.log('');
 
-    // 5. Flash Message / Toast Line
+    outputLines.push('');
+
+    // 3. Action Dock
+    outputLines.push(this.buildActionDock(termWidth));
+
+    // 4. Flash Banner / Telemetry Notice
     if (this.flashMessage) {
-      console.log(`  ${pc.bold(pc.yellow('⚡ [Action]'))} ${this.flashMessage}`);
+      outputLines.push(`  ${pc.bold(pc.yellow('⚡ [Alert]'))} ${this.flashMessage}`);
     } else {
-      console.log(`  ${pc.dim(`⚡ Auto-refreshing every ${this.autoRefreshSeconds}s. Press [r] to refresh now.`)}`);
+      outputLines.push(
+        `  ${pc.dim('⚡ Auto-monitoring active • Press [r] to poll now • Use [↑/↓] or [1-9] to select repo')}`
+      );
     }
-    console.log('');
 
-    // 6. Action Hotkeys Bar
-    console.log(
-      renderActionBar([
-        { key: 'c', label: 'Commit' },
-        { key: 'd', label: 'Diff' },
-        { key: 'o', label: 'Open' },
-        { key: 'w', label: 'Watch' },
-        { key: 'u', label: 'Unwatch' },
-        { key: 's', label: 'Daemon' },
-        { key: 'n', label: 'Notify' },
-        { key: 'r', label: 'Refresh' },
-        { key: 'q', label: 'Exit' },
-      ])
-    );
+    const frameString = outputLines.join('\n');
+
+    if (process.stdout.isTTY) {
+      writeFrame(frameString);
+    } else {
+      console.log(frameString);
+    }
+  }
+
+  /**
+   * Legacy render alias for compatibility
+   */
+  public render(): void {
+    this.renderFrame();
   }
 
   /**
@@ -303,12 +515,23 @@ export class DashboardApp {
       return;
     }
 
+    // Direct numeric repo selection: [1-9]
+    if (/^[1-9]$/.test(str)) {
+      const targetIdx = parseInt(str, 10) - 1;
+      if (targetIdx < this.repos.length) {
+        this.userNavigated = true;
+        this.selectedIndex = targetIdx;
+        this.renderFrame();
+      }
+      return;
+    }
+
     // Navigation: Up / k
     if ((key && key.name === 'up') || str === 'k') {
       if (this.repos.length > 0) {
         this.userNavigated = true;
         this.selectedIndex = (this.selectedIndex - 1 + this.repos.length) % this.repos.length;
-        this.render();
+        this.renderFrame();
       }
       return;
     }
@@ -318,7 +541,7 @@ export class DashboardApp {
       if (this.repos.length > 0) {
         this.userNavigated = true;
         this.selectedIndex = (this.selectedIndex + 1) % this.repos.length;
-        this.render();
+        this.renderFrame();
       }
       return;
     }
@@ -327,7 +550,7 @@ export class DashboardApp {
     if (str === 'r' || str === 'R') {
       await this.loadState();
       this.setFlash(pc.cyan('Refreshed repository statuses.'));
-      this.render();
+      this.renderFrame();
       return;
     }
 
@@ -340,19 +563,16 @@ export class DashboardApp {
       }
 
       if (!active.isDirty) {
-        this.setFlash(pc.green(`Repository "${active.name}" is already clean! Nothing to commit.`));
+        this.setFlash(pc.green(`Repository "${active.name}" is clean! Nothing to commit.`));
         return;
       }
 
       // Enter interactive wizard
       this.isInteracting = true;
-      if (this.refreshTimer) {
-        clearInterval(this.refreshTimer);
-        this.refreshTimer = null;
-      }
+      leaveAlternateScreen();
       showCursor();
-
       clearScreen();
+
       await runCommitWizard(active.rootPath);
 
       // Return to dashboard
@@ -365,16 +585,16 @@ export class DashboardApp {
         process.stdin.once('data', resumeHandler);
       });
 
-      this.isInteracting = false;
+      enterAlternateScreen();
       hideCursor();
+      this.isInteracting = false;
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
         process.stdin.resume();
       }
 
       await this.loadState();
-      this.startRefreshTimer();
-      this.render();
+      this.renderFrame();
       return;
     }
 
@@ -387,10 +607,7 @@ export class DashboardApp {
       }
 
       this.isInteracting = true;
-      if (this.refreshTimer) {
-        clearInterval(this.refreshTimer);
-        this.refreshTimer = null;
-      }
+      leaveAlternateScreen();
       showCursor();
       clearScreen();
 
@@ -415,15 +632,15 @@ export class DashboardApp {
         process.stdin.once('data', resumeHandler);
       });
 
-      this.isInteracting = false;
+      enterAlternateScreen();
       hideCursor();
+      this.isInteracting = false;
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(true);
         process.stdin.resume();
       }
 
-      this.startRefreshTimer();
-      this.render();
+      this.renderFrame();
       return;
     }
 
@@ -448,7 +665,7 @@ export class DashboardApp {
       } catch {
         this.setFlash(pc.yellow(`Could not open editor. Try running: gitremind open code .`));
       }
-      this.render();
+      this.renderFrame();
       return;
     }
 
@@ -462,7 +679,7 @@ export class DashboardApp {
         this.setFlash(pc.yellow(`ℹ ${res.message}`));
       }
       await this.loadState();
-      this.render();
+      this.renderFrame();
       return;
     }
 
@@ -481,7 +698,7 @@ export class DashboardApp {
         this.setFlash(pc.yellow(`ℹ ${res.message}`));
       }
       await this.loadState();
-      this.render();
+      this.renderFrame();
       return;
     }
 
@@ -491,7 +708,7 @@ export class DashboardApp {
       if (current.running && current.pid) {
         try {
           process.kill(current.pid, 'SIGTERM');
-          this.setFlash(pc.green(`✔ Background daemon (PID: ${current.pid}) stopped.`));
+          this.setFlash(pc.green(`✔ Daemon (PID: ${current.pid}) stopped.`));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.setFlash(pc.red(`✖ Failed to stop daemon: ${msg}`));
@@ -500,23 +717,23 @@ export class DashboardApp {
         const entryPath = this.getEntryPath();
         const spawnRes = GitRemindDaemon.spawnBackground(entryPath);
         if (spawnRes.success) {
-          this.setFlash(pc.green(`✔ Background daemon started (PID: ${spawnRes.pid || 'active'}).`));
+          this.setFlash(pc.green(`✔ Daemon started (PID: ${spawnRes.pid || 'active'}).`));
         } else {
           this.setFlash(pc.red(`✖ ${spawnRes.message}`));
         }
       }
-      this.render();
+      this.renderFrame();
       return;
     }
 
     // Test notification: [n]
     if (str === 'n' || str === 'N') {
-      this.setFlash(pc.cyan('Sending test desktop notification...'));
-      this.render();
+      this.setFlash(pc.cyan('Sending desktop alert...'));
+      this.renderFrame();
       const sent = await notifier.notify({
         trigger: 'test',
-        title: 'GitRemind Notification',
-        subtitle: 'Desktop Alert Service',
+        title: 'GitRemind Alert',
+        subtitle: 'Desktop Reminder Service',
         message: 'GitRemind dashboard notification test succeeded!',
       });
       if (sent) {
@@ -524,7 +741,7 @@ export class DashboardApp {
       } else {
         this.setFlash(pc.yellow('ℹ Test notification triggered.'));
       }
-      this.render();
+      this.renderFrame();
       return;
     }
   }
@@ -532,16 +749,34 @@ export class DashboardApp {
   /**
    * Starts periodic background state reload
    */
-  private startRefreshTimer(): void {
-    if (this.refreshTimer) {
-      clearInterval(this.refreshTimer);
+  private startPollTimer(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
     }
-    this.refreshTimer = setInterval(async () => {
+    this.pollTimer = setInterval(async () => {
       if (!this.isInteracting && this.isRunning) {
         await this.loadState();
-        this.render();
+        this.renderFrame();
       }
     }, this.autoRefreshSeconds * 1000);
+  }
+
+  /**
+   * Starts fluid 120ms animation loop for braille spinner, pulse, and digital clock
+   */
+  private startAnimTimer(): void {
+    if (this.animTimer) {
+      clearInterval(this.animTimer);
+    }
+    this.animTimer = setInterval(() => {
+      if (!this.isInteracting && this.isRunning) {
+        this.spinnerIndex = (this.spinnerIndex + 1) % SPINNER_FRAMES.length;
+        if (this.spinnerIndex % 2 === 0) {
+          this.pulseIndex = (this.pulseIndex + 1) % PULSE_FRAMES.length;
+        }
+        this.renderFrame();
+      }
+    }, 120);
   }
 
   /**
@@ -558,12 +793,14 @@ export class DashboardApp {
 
     if (!process.stdin.isTTY) {
       // Non-interactive fallback (e.g. CI or piped stdout)
-      this.render();
+      this.renderFrame();
       console.log(pc.yellow('\nNotice: Non-interactive terminal environment detected. Exiting dashboard.\n'));
       return;
     }
 
+    enterAlternateScreen();
     hideCursor();
+
     readline.emitKeypressEvents(process.stdin);
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
@@ -573,14 +810,24 @@ export class DashboardApp {
     const keyListener = (str: string, key: readline.Key) => {
       this.handleKey(str, key).catch((err) => {
         this.setFlash(pc.red(`Error: ${err.message}`));
-        this.render();
+        this.renderFrame();
       });
     };
 
     process.stdin.on('keypress', keyListener);
 
-    this.startRefreshTimer();
-    this.render();
+    // Terminal resize handler
+    if (process.stdout.on) {
+      process.stdout.on('resize', () => {
+        if (this.isRunning && !this.isInteracting) {
+          this.renderFrame();
+        }
+      });
+    }
+
+    this.startAnimTimer();
+    this.startPollTimer();
+    this.renderFrame();
 
     // Clean exit handlers
     const onExit = () => {
@@ -597,14 +844,19 @@ export class DashboardApp {
    */
   public async stop(): Promise<void> {
     this.isRunning = false;
-    if (this.refreshTimer) {
-      clearInterval(this.refreshTimer);
-      this.refreshTimer = null;
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.animTimer) {
+      clearInterval(this.animTimer);
+      this.animTimer = null;
     }
     if (this.flashTimer) {
       clearTimeout(this.flashTimer);
       this.flashTimer = null;
     }
+    leaveAlternateScreen();
     showCursor();
     if (process.stdin.isTTY && process.stdin.isRaw) {
       process.stdin.setRawMode(false);

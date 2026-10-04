@@ -459,3 +459,67 @@ export function suggestCommitMessage(stateOrFiles: GitRepoState | GitFileStatus[
   return generateCommitSuggestion(files);
 }
 
+export interface CommitHistoryItem {
+  hash: string;
+  relativeTime: string;
+  author: string;
+  message: string;
+}
+
+/**
+ * Retrieves recent commits for the repository
+ */
+export async function getRecentCommits(
+  repoPath: string,
+  limit = 5
+): Promise<CommitHistoryItem[]> {
+  try {
+    const root = (await getRepoRoot(repoPath)) || repoPath;
+    const logOut = await runGit(['log', `-${limit}`, '--format=%h|%cr|%an|%s'], root);
+    if (!logOut || !logOut.trim()) return [];
+    return logOut
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+      .map((line) => {
+        const [hash, relativeTime, author, message] = line.split('|');
+        return {
+          hash: hash || '',
+          relativeTime: relativeTime || '',
+          author: author || '',
+          message: message || '',
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+export interface UpstreamStatus {
+  ahead: number;
+  behind: number;
+  upstream: string;
+}
+
+/**
+ * Checks ahead / behind count against remote tracking branch
+ */
+export async function getUpstreamStatus(repoPath: string): Promise<UpstreamStatus> {
+  try {
+    const root = (await getRepoRoot(repoPath)) || repoPath;
+    const revOut = await runGit(['rev-parse', '--abbrev-ref', '@{upstream}'], root);
+    const upstream = revOut.trim();
+    if (!upstream) {
+      return { ahead: 0, behind: 0, upstream: '' };
+    }
+    const counts = await runGit(['rev-list', '--left-right', '--count', `HEAD...${upstream}`], root);
+    const [aheadStr, behindStr] = counts.trim().split(/\s+/);
+    return {
+      ahead: parseInt(aheadStr || '0', 10) || 0,
+      behind: parseInt(behindStr || '0', 10) || 0,
+      upstream,
+    };
+  } catch {
+    return { ahead: 0, behind: 0, upstream: '' };
+  }
+}
+

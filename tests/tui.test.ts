@@ -12,6 +12,10 @@ import {
   formatDaemonPill,
   formatStatusPill,
   renderActionBar,
+  renderTelemetryBar,
+  renderDualPaneBox,
+  SPINNER_FRAMES,
+  PULSE_FRAMES,
   ASCII_BANNER,
 } from '../src/cli/tui.js';
 
@@ -103,5 +107,39 @@ describe('TUI Utility Library', () => {
     assert.ok(plain.includes('[c] Commit'));
     assert.ok(plain.includes('[w] Watch'));
     assert.ok(plain.includes('[q] Exit'));
+  });
+
+  it('should render telemetry uncommitted progress bar correctly', () => {
+    const cleanBar = renderTelemetryBar({ modified: 0, untracked: 0, staged: 0, deleted: 0, total: 0 }, 15);
+    assert.ok(stripAnsi(cleanBar).includes('Clean & Synced'));
+
+    const dirtyBar = renderTelemetryBar({ modified: 4, untracked: 2, staged: 1, deleted: 0, total: 7 }, 20);
+    assert.ok(stripAnsi(dirtyBar).includes('7 uncommitted'));
+  });
+
+  it('should render balanced dual-pane box with equal heights and proper widths', () => {
+    const leftPane = {
+      title: 'Left Repo List',
+      lines: ['Item 1', 'Item 2'],
+      width: 30,
+    };
+    const rightPane = {
+      title: 'Right Details',
+      lines: ['Detail line 1', 'Detail line 2', 'Detail line 3', 'Detail line 4'],
+      width: 45,
+    };
+
+    const dualPane = renderDualPaneBox(leftPane, rightPane);
+    const rows = dualPane.split('\n');
+
+    assert.ok(rows.length >= 6); // top + 4 lines + bottom
+    for (const row of rows) {
+      assert.equal(visibleLength(row), 30 + 45 + 1); // 30 + 1 space + 45 = 76
+    }
+  });
+
+  it('should provide animated spinner and pulse frame arrays', () => {
+    assert.ok(Array.isArray(SPINNER_FRAMES) && SPINNER_FRAMES.length >= 8);
+    assert.ok(Array.isArray(PULSE_FRAMES) && PULSE_FRAMES.length >= 4);
   });
 });

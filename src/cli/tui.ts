@@ -1,6 +1,9 @@
 import pc from 'picocolors';
 import { GitFileStatus, FileChangeKind } from '../core/types.js';
 
+export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+export const PULSE_FRAMES = ['●', '◉', '◎', '○', '◎', '◉'];
+
 /**
  * Strips ANSI escape codes to calculate visual string width
  */
@@ -126,7 +129,7 @@ export function renderBox(options: {
   borderColor?: (str: string) => string;
 }): string {
   const { title, lines, width = 78, borderColor = pc.cyan } = options;
-  const innerWidth = Math.max(20, width - 4); // 2 border chars + 2 padding spaces
+  const innerWidth = Math.max(20, width - 4);
 
   const topBorder = title
     ? borderColor('╭─ ') + pc.bold(title) + ' ' + borderColor('─'.repeat(Math.max(0, innerWidth - visibleLength(title) - 1)) + '╮')
@@ -140,6 +143,102 @@ export function renderBox(options: {
   });
 
   return [topBorder, ...contentLines, bottomBorder].join('\n');
+}
+
+/**
+ * Renders two boxes side-by-side with matched row counts and clean borders
+ */
+export function renderDualPaneBox(
+  left: { title: string; lines: string[]; width: number; borderColor?: (s: string) => string },
+  right: { title: string; lines: string[]; width: number; borderColor?: (s: string) => string }
+): string {
+  const leftColor = left.borderColor || pc.cyan;
+  const rightColor = right.borderColor || pc.blue;
+
+  const leftInnerWidth = Math.max(10, left.width - 4);
+  const rightInnerWidth = Math.max(10, right.width - 4);
+
+  const leftTop = left.title
+    ? leftColor('╭─ ') + pc.bold(left.title) + ' ' + leftColor('─'.repeat(Math.max(0, leftInnerWidth - visibleLength(left.title) - 1)) + '╮')
+    : leftColor('╭' + '─'.repeat(leftInnerWidth + 2) + '╮');
+
+  const rightTop = right.title
+    ? rightColor('╭─ ') + pc.bold(right.title) + ' ' + rightColor('─'.repeat(Math.max(0, rightInnerWidth - visibleLength(right.title) - 1)) + '╮')
+    : rightColor('╭' + '─'.repeat(rightInnerWidth + 2) + '╮');
+
+  const leftBottom = leftColor('╰' + '─'.repeat(leftInnerWidth + 2) + '╯');
+  const rightBottom = rightColor('╰' + '─'.repeat(rightInnerWidth + 2) + '╯');
+
+  const maxRows = Math.max(left.lines.length, right.lines.length);
+  const rows: string[] = [];
+
+  rows.push(`${leftTop} ${rightTop}`);
+
+  for (let i = 0; i < maxRows; i++) {
+    const lRaw = left.lines[i] !== undefined ? left.lines[i] : '';
+    const rRaw = right.lines[i] !== undefined ? right.lines[i] : '';
+
+    const lPadded = pad(lRaw, leftInnerWidth);
+    const rPadded = pad(rRaw, rightInnerWidth);
+
+    rows.push(`${leftColor('│ ')}${lPadded}${leftColor(' │')} ${rightColor('│ ')}${rPadded}${rightColor(' │')}`);
+  }
+
+  rows.push(`${leftBottom} ${rightBottom}`);
+  return rows.join('\n');
+}
+
+/**
+ * Renders a visual telemetry progress bar of uncommitted changes
+ */
+export function renderTelemetryBar(
+  summary: { modified: number; untracked: number; staged: number; deleted: number; total: number },
+  barWidth = 20
+): string {
+  if (summary.total === 0) {
+    return `${pc.green(`[${'━'.repeat(barWidth)}]`)} ${pc.bold(pc.green('✔ Clean & Synced'))}`;
+  }
+
+  const { staged, modified, untracked, deleted, total } = summary;
+  const stagedChars = Math.min(barWidth, Math.round((staged / total) * barWidth));
+  const modifiedChars = Math.min(barWidth - stagedChars, Math.round((modified / total) * barWidth));
+  const untrackedChars = Math.min(barWidth - stagedChars - modifiedChars, Math.round((untracked / total) * barWidth));
+  const deletedChars = Math.min(barWidth - stagedChars - modifiedChars - untrackedChars, Math.round((deleted / total) * barWidth));
+  const remaining = Math.max(0, barWidth - stagedChars - modifiedChars - untrackedChars - deletedChars);
+
+  const bar =
+    pc.cyan('█'.repeat(stagedChars)) +
+    pc.yellow('█'.repeat(modifiedChars)) +
+    pc.green('░'.repeat(untrackedChars)) +
+    pc.red('x'.repeat(deletedChars)) +
+    pc.dim('─'.repeat(remaining));
+
+  return `[${bar}] ${pc.bold(pc.yellow(`${total} uncommitted`))}`;
+}
+
+/**
+ * Enters alternate screen buffer and hides cursor for flicker-free TUI
+ */
+export function enterAlternateScreen(): void {
+  if (process.stdout.isTTY) {
+    process.stdout.write('\x1b[?1049h\x1b[H\x1b[?25l');
+  }
+}
+
+/**
+ * Exits alternate screen buffer and restores terminal cursor
+ */
+export function leaveAlternateScreen(): void {
+  if (process.stdout.isTTY) {
+    process.stdout.write('\x1b[?1049l\x1b[?25h');
+  }
+}
+
+/**
+ * Atomic frame writer that resets cursor to top-left and replaces screen contents
+ */
+export function writeFrame(frame: string): void {
+  process.stdout.write('\x1b[H' + frame);
 }
 
 /**
