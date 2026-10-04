@@ -164,10 +164,10 @@ export class DashboardApp {
   }
 
   /**
-   * Generates the signature cyberpunk top bar
+   * Generates the signature unified top status box
    */
-  private buildTopBar(termWidth: number, daemonRunning: boolean, daemonPid?: number): string[] {
-    const w = termWidth;
+  private buildTopBar(termWidth: number, daemonRunning: boolean, daemonPid?: number): string {
+    const innerW = termWidth - 4;
     const pulseChar = PULSE_FRAMES[this.pulseIndex % PULSE_FRAMES.length];
     const spinnerChar = SPINNER_FRAMES[this.spinnerIndex % SPINNER_FRAMES.length];
 
@@ -180,13 +180,9 @@ export class DashboardApp {
 
     const countdownSec = Math.max(0, Math.ceil((this.nextPollTimestamp - Date.now()) / 1000));
 
-    // Brand tag
-    const brand = `${pc.bold(pc.bgCyan(pc.black(' GitRemind ')))} ${pc.bold(pc.cyan('v1.0.0'))}`;
-    const brandInnerW = 20;
-
     // Daemon pill
     const daemonTag = daemonRunning
-      ? `${pc.bold(pc.green(pulseChar))} ${pc.bold(pc.white('DAEMON ACTIVE'))} ${pc.dim(`(${daemonPid || 'auto'})`)}`
+      ? `${pc.bold(pc.green(pulseChar))} ${pc.bold(pc.white('DAEMON ACTIVE'))} ${pc.dim(`(PID: ${daemonPid || 'auto'})`)}`
       : `${pc.red('○')} ${pc.dim('DAEMON STOPPED')}`;
 
     const dirtyCount = this.repos.filter((r) => r.isDirty).length;
@@ -194,26 +190,23 @@ export class DashboardApp {
       ? `${pc.bold(pc.yellow(`▲ ${dirtyCount}/${this.repos.length} Dirty`))}`
       : `${pc.bold(pc.green(`● ${this.repos.length} Clean`))}`;
 
-    const clockTag = `${pc.cyan(spinnerChar)} ${pc.dim(`${countdownSec}s`)} │ ${pc.bold(pc.white(timeStr))}`;
+    const clockTag = `${pc.cyan(spinnerChar)} ${pc.dim(`Auto-poll ${countdownSec}s`)} │ ${pc.bold(pc.white(timeStr))}`;
 
-    const leftPart = `╭─ ${brand} ─╮  ${daemonTag}  │  ${summaryTag}`;
-    const rightPart = `${clockTag} ─╮`;
+    const leftGroup = `${daemonTag}  │  ${summaryTag}`;
+    const rightGroup = clockTag;
 
-    const leftLen = visibleLength(leftPart);
-    const rightLen = visibleLength(rightPart);
-    const available = w - leftLen - rightLen;
+    const leftLen = visibleLength(leftGroup);
+    const rightLen = visibleLength(rightGroup);
+    const gap = Math.max(2, innerW - leftLen - rightLen);
 
-    let topBorder: string;
-    if (available >= 2) {
-      topBorder = leftPart + ' ' + pc.cyan('─'.repeat(available - 2)) + ' ' + rightPart;
-    } else {
-      topBorder = leftPart + '  ' + rightPart;
-    }
+    const contentLine = leftGroup + ' '.repeat(gap) + rightGroup;
 
-    const subRemaining = Math.max(2, w - brandInnerW - 6);
-    const subBorder = pc.cyan('╰' + '─'.repeat(brandInnerW + 2) + '┴' + '─'.repeat(subRemaining) + '╯');
-
-    return [topBorder, subBorder];
+    return renderBox({
+      title: 'GitRemind v1.0.0',
+      lines: [contentLine],
+      width: termWidth,
+      borderColor: pc.cyan,
+    });
   }
 
   /**
@@ -236,31 +229,26 @@ export class DashboardApp {
         normalizeRepoPath(repo.rootPath).toLowerCase() === normalizeRepoPath(this.currentCwdRoot).toLowerCase();
 
       const numBadge = pc.dim(`[${idx + 1}]`);
-      const star = isCurrent ? pc.cyan('★ ') : '';
-      const rawName = `${star}${repo.name}`;
-      const nameTrunc = truncate(rawName, innerW - 10);
+      const star = isCurrent ? pc.cyan(' ★') : '';
+      const rawName = `${repo.name}`;
+      const nameTrunc = truncate(rawName, innerW - 12);
 
       const statusBadge = repo.isDirty
-        ? pc.bold(pc.yellow(`▲ ${repo.summary.total}`))
+        ? pc.bold(pc.yellow(`▲ ${repo.summary.total} uncommitted`))
         : pc.green('● clean');
 
-      const branchStr = pc.magenta(`⎇ ${truncate(repo.branch || 'HEAD', 10)}`);
+      const branchStr = pc.magenta(`(${truncate(repo.branch || 'HEAD', 10)})`);
 
       if (isSelected) {
-        // High-visibility glowing selection row
-        const titleRow = `${pc.bold(pc.cyan('▸ █ '))} ${pc.bold(pc.white(nameTrunc))} ${numBadge}`;
-        const metaRow = `    ${branchStr} │ ${statusBadge}`;
-        lines.push(titleRow);
-        lines.push(metaRow);
+        lines.push(` ${pc.bold(pc.cyan('▸'))} ${pc.bold(pc.white(nameTrunc))}${star} ${numBadge}`);
+        lines.push(`   ${branchStr} │ ${statusBadge}`);
       } else {
-        const titleRow = `  · ${pc.white(nameTrunc)} ${numBadge}`;
-        const metaRow = `    ${pc.dim(branchStr)} │ ${statusBadge}`;
-        lines.push(titleRow);
-        lines.push(metaRow);
+        lines.push(`   ${pc.white(nameTrunc)}${star} ${numBadge}`);
+        lines.push(`   ${pc.dim(branchStr)} │ ${statusBadge}`);
       }
 
       if (idx < this.repos.length - 1) {
-        lines.push(pc.dim('  ' + '─'.repeat(Math.max(4, innerW - 4))));
+        lines.push('---DIVIDER---');
       }
     });
 
@@ -285,44 +273,51 @@ export class DashboardApp {
     };
 
     // 1. Repo header & location
-    const safePath = truncate(active.rootPath, innerW - 8);
-    lines.push(`${pc.bold('Path   :')} ${pc.dim(safePath)}`);
+    const safePath = truncate(active.rootPath, innerW - 10);
+    lines.push(` ${pc.bold('Path   :')} ${pc.dim(safePath)}`);
 
     let upstreamInfo = pc.dim('(local only)');
     if (extra.upstream.upstream) {
       if (extra.upstream.ahead === 0 && extra.upstream.behind === 0) {
         upstreamInfo = pc.green(`synced with ${extra.upstream.upstream}`);
       } else {
-        const aheadStr = extra.upstream.ahead > 0 ? pc.cyan(`↑${extra.upstream.ahead} `) : '';
-        const behindStr = extra.upstream.behind > 0 ? pc.red(`↓${extra.upstream.behind}`) : '';
+        const aheadStr = extra.upstream.ahead > 0 ? pc.cyan(`↑${extra.upstream.ahead} ahead `) : '';
+        const behindStr = extra.upstream.behind > 0 ? pc.red(`↓${extra.upstream.behind} behind`) : '';
         upstreamInfo = `${aheadStr}${behindStr} (${extra.upstream.upstream})`;
       }
     }
 
     lines.push(
-      `${pc.bold('Branch :')} ${pc.magenta(`⎇ ${active.branch}`)}  ${pc.dim('│')}  ${pc.bold('Upstream:')} ${upstreamInfo}`
+      ` ${pc.bold('Branch :')} ${pc.magenta(`(${active.branch})`)}  ${pc.dim('│')}  ${pc.bold('Upstream:')} ${upstreamInfo}`
     );
 
-    lines.push(pc.dim('─'.repeat(innerW)));
+    lines.push('---DIVIDER---');
 
     // 2. Visual Telemetry Bar & Breakdown
-    const barWidth = Math.max(12, Math.min(26, innerW - 28));
+    const barWidth = Math.max(12, Math.min(24, innerW - 28));
     const telemetryBar = renderTelemetryBar(active.summary, barWidth);
-    lines.push(`${pc.bold('Telemetry :')} ${telemetryBar}`);
+    lines.push(` ${pc.bold('Telemetry :')} ${telemetryBar}`);
 
     const badgeStaged = pc.cyan(`● ${active.summary.staged} Staged`);
     const badgeModified = pc.yellow(`▲ ${active.summary.modified} Modified`);
     const badgeUntracked = pc.green(`+ ${active.summary.untracked} Untracked`);
-    const badgeDeleted = pc.red(`✖ ${active.summary.deleted} Deleted`);
-    lines.push(`            ${badgeStaged}  │  ${badgeModified}  │  ${badgeUntracked}  │  ${badgeDeleted}`);
+    const badgeDeleted = pc.red(`- ${active.summary.deleted} Deleted`);
 
-    lines.push(pc.dim('─'.repeat(innerW)));
+    const fullBadgeLine = ` ${badgeStaged}  │  ${badgeModified}  │  ${badgeUntracked}  │  ${badgeDeleted}`;
+    if (visibleLength(fullBadgeLine) <= innerW) {
+      lines.push(fullBadgeLine);
+    } else {
+      lines.push(` ${badgeStaged}  │  ${badgeModified}`);
+      lines.push(` ${badgeUntracked}  │  ${badgeDeleted}`);
+    }
 
-    // 3. Uncommitted Changes List
+    lines.push('---DIVIDER---');
+
+    // 3. Uncommitted Changes List / Clean Status
     if (active.isDirty) {
       const activeAge = active.firstDirtyRelative ? ` (active for ${active.firstDirtyRelative})` : '';
       lines.push(
-        `${pc.bold(pc.yellow('Uncommitted Files'))} ${pc.dim(`[${active.files.length} total]${activeAge}`)}:`
+        ` ${pc.bold(pc.yellow('Uncommitted Files'))} ${pc.dim(`[${active.files.length} total]${activeAge}`)}:`
       );
 
       const maxFileRows = 5;
@@ -330,35 +325,35 @@ export class DashboardApp {
       for (const file of visibleFiles) {
         const badge = formatBadge(file.kind);
         const stagedTag = file.staged ? pc.green(' [staged]') : '';
-        const filePath = truncate(file.path, innerW - 12);
-        lines.push(`  ${badge} ${pc.white(filePath)}${stagedTag}`);
+        const filePath = truncate(file.path, innerW - 14);
+        lines.push(`   ${badge} ${pc.white(filePath)}${stagedTag}`);
       }
 
       if (active.files.length > maxFileRows) {
-        lines.push(pc.dim(`  ... and ${active.files.length - maxFileRows} more files`));
+        lines.push(pc.dim(`   ... and ${active.files.length - maxFileRows} more files`));
       }
     } else {
-      lines.push(`${pc.bold('Status    :')} ${pc.green('✔ Clean working tree. Everything is committed.')}`);
+      lines.push(` ${pc.bold('Status    :')} ${pc.green('✔  Clean working tree. Everything is committed.')}`);
     }
 
-    lines.push(pc.dim('─'.repeat(innerW)));
+    lines.push('---DIVIDER---');
 
     // 4. Recent Commits Timeline
-    lines.push(pc.bold(pc.cyan('Recent Commit Timeline:')));
+    lines.push(` ${pc.bold(pc.cyan('Recent Commit Timeline:'))}`);
     if (extra.recentCommits.length > 0) {
       for (const c of extra.recentCommits) {
         const hash = pc.yellow(c.hash);
         const rel = pc.dim(`(${c.relativeTime})`);
-        const msg = pc.white(truncate(c.message, innerW - c.hash.length - c.relativeTime.length - 8));
-        lines.push(`  ${hash} ${rel} ${msg}`);
+        const msg = pc.white(truncate(c.message, innerW - c.hash.length - c.relativeTime.length - 10));
+        lines.push(`   ${hash} ${rel} ${msg}`);
       }
     } else if (active.lastCommitHash) {
       const hash = pc.yellow(active.lastCommitHash);
       const rel = pc.dim(`(${active.lastCommitRelative})`);
-      const msg = pc.white(truncate(active.lastCommitMessage, innerW - 20));
-      lines.push(`  ${hash} ${rel} "${msg}"`);
+      const msg = pc.white(truncate(active.lastCommitMessage, innerW - 22));
+      lines.push(`   ${hash} ${rel} "${msg}"`);
     } else {
-      lines.push(pc.dim('  Waiting for initial commit'));
+      lines.push(pc.dim('   Waiting for initial commit'));
     }
 
     return lines;
@@ -387,23 +382,24 @@ export class DashboardApp {
 
     const singleLine = parts.join(pc.dim(' │ '));
     if (visibleLength(singleLine) <= innerW) {
-      const hotkeyLine = pad(singleLine, innerW, 'center');
-      const topBorder = pc.cyan('╭─ Action Dock ' + '─'.repeat(Math.max(0, innerW - 13)) + '╮');
-      const content = pc.cyan('│ ') + hotkeyLine + pc.cyan(' │');
-      const bottomBorder = pc.cyan('╰' + '─'.repeat(innerW + 2) + '╯');
-      return [topBorder, content, bottomBorder].join('\n');
+      return renderBox({
+        title: 'Action Dock',
+        lines: [pad(singleLine, innerW, 'center')],
+        width: termWidth,
+        borderColor: pc.cyan,
+      });
     }
 
     // 2-row layout for narrower screens so no keys are truncated
     const row1 = pad(parts.slice(0, 5).join(pc.dim(' │ ')), innerW, 'center');
     const row2 = pad(parts.slice(5).join(pc.dim(' │ ')), innerW, 'center');
 
-    const topBorder = pc.cyan('╭─ Action Dock ' + '─'.repeat(Math.max(0, innerW - 13)) + '╮');
-    const line1 = pc.cyan('│ ') + row1 + pc.cyan(' │');
-    const line2 = pc.cyan('│ ') + row2 + pc.cyan(' │');
-    const bottomBorder = pc.cyan('╰' + '─'.repeat(innerW + 2) + '╯');
-
-    return [topBorder, line1, line2, bottomBorder].join('\n');
+    return renderBox({
+      title: 'Action Dock',
+      lines: [row1, row2],
+      width: termWidth,
+      borderColor: pc.cyan,
+    });
   }
 
   /**
@@ -413,20 +409,19 @@ export class DashboardApp {
     if (this.isInteracting) return;
 
     const termCols = process.stdout.columns || 80;
-    const termWidth = Math.max(80, Math.min(termCols, 120));
+    // Leave 2 columns safety buffer so Windows Terminal never auto-wraps or clips lines
+    const termWidth = Math.max(76, Math.min(termCols - 2, 110));
 
     const daemonInfo = GitRemindDaemon.isRunning();
-
     const outputLines: string[] = [];
 
-    // 1. Signature Cyberpunk Top Bar
-    const topBarLines = this.buildTopBar(termWidth, daemonInfo.running, daemonInfo.pid);
-    outputLines.push(...topBarLines);
+    // 1. Signature Unified Top Bar
+    outputLines.push(this.buildTopBar(termWidth, daemonInfo.running, daemonInfo.pid));
     outputLines.push('');
 
     // 2. Dual Pane Grid or Responsive Stack
-    if (termWidth >= 88) {
-      const leftW = Math.max(30, Math.min(36, Math.floor(termWidth * 0.35)));
+    if (termWidth >= 86) {
+      const leftW = Math.max(28, Math.min(34, Math.floor(termWidth * 0.34)));
       const rightW = termWidth - leftW - 1;
 
       const leftLines = this.buildRepoListLines(leftW - 4);
@@ -438,7 +433,7 @@ export class DashboardApp {
           title: `Repositories (${this.repos.length})`,
           lines: leftLines,
           width: leftW,
-          borderColor: pc.blue,
+          borderColor: pc.cyan,
         },
         {
           title: `Inspector: ${activeName}`,
@@ -458,7 +453,7 @@ export class DashboardApp {
           title: `Repositories (${this.repos.length})`,
           lines: leftLines,
           width: termWidth,
-          borderColor: pc.blue,
+          borderColor: pc.cyan,
         })
       );
       outputLines.push('');
@@ -762,7 +757,7 @@ export class DashboardApp {
   }
 
   /**
-   * Starts fluid 120ms animation loop for braille spinner, pulse, and digital clock
+   * Starts fluid 120ms animation loop for rotating radar circle, pulse, and digital clock
    */
   private startAnimTimer(): void {
     if (this.animTimer) {

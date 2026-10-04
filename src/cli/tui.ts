@@ -1,7 +1,7 @@
 import pc from 'picocolors';
 import { GitFileStatus, FileChangeKind } from '../core/types.js';
 
-export const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+export const SPINNER_FRAMES = ['◐', '◓', '◑', '◒', '◐', '◓', '◑', '◒'];
 export const PULSE_FRAMES = ['●', '◉', '◎', '○', '◎', '◉'];
 
 /**
@@ -120,7 +120,7 @@ export function formatStatusPill(isDirty: boolean, uncommittedCount = 0): string
 }
 
 /**
- * Renders a stylized box with rounded borders and strict width clipping
+ * Renders a stylized box with rounded borders, title clipping, and internal connected divider support
  */
 export function renderBox(options: {
   title?: string;
@@ -129,15 +129,25 @@ export function renderBox(options: {
   borderColor?: (str: string) => string;
 }): string {
   const { title, lines, width = 78, borderColor = pc.cyan } = options;
-  const innerWidth = Math.max(20, width - 4);
+  const w = width;
+  const innerWidth = Math.max(10, w - 4);
 
-  const topBorder = title
-    ? borderColor('╭─ ') + pc.bold(title) + ' ' + borderColor('─'.repeat(Math.max(0, innerWidth - visibleLength(title) - 1)) + '╮')
-    : borderColor('╭' + '─'.repeat(innerWidth + 2) + '╮');
+  let topBorder: string;
+  if (title) {
+    const titleStr = ` ${title} `;
+    const tLen = visibleLength(titleStr);
+    const dashLen = Math.max(0, w - 3 - tLen);
+    topBorder = borderColor('╭─') + pc.bold(pc.white(titleStr)) + borderColor('─'.repeat(dashLen) + '╮');
+  } else {
+    topBorder = borderColor('╭' + '─'.repeat(w - 2) + '╮');
+  }
 
-  const bottomBorder = borderColor('╰' + '─'.repeat(innerWidth + 2) + '╯');
+  const bottomBorder = borderColor('╰' + '─'.repeat(w - 2) + '╯');
 
   const contentLines = lines.map((line) => {
+    if (line === '---DIVIDER---') {
+      return borderColor('├' + '─'.repeat(w - 2) + '┤');
+    }
     const padded = pad(line, innerWidth);
     return borderColor('│ ') + padded + borderColor(' │');
   });
@@ -146,28 +156,31 @@ export function renderBox(options: {
 }
 
 /**
- * Renders two boxes side-by-side with matched row counts and clean borders
+ * Renders two boxes side-by-side with matched row counts, clean borders, and internal connected divider support
  */
 export function renderDualPaneBox(
   left: { title: string; lines: string[]; width: number; borderColor?: (s: string) => string },
   right: { title: string; lines: string[]; width: number; borderColor?: (s: string) => string }
 ): string {
   const leftColor = left.borderColor || pc.cyan;
-  const rightColor = right.borderColor || pc.blue;
+  const rightColor = right.borderColor || pc.cyan;
 
   const leftInnerWidth = Math.max(10, left.width - 4);
   const rightInnerWidth = Math.max(10, right.width - 4);
 
+  const leftTitleStr = left.title ? ` ${left.title} ` : '';
+  const rightTitleStr = right.title ? ` ${right.title} ` : '';
+
   const leftTop = left.title
-    ? leftColor('╭─ ') + pc.bold(left.title) + ' ' + leftColor('─'.repeat(Math.max(0, leftInnerWidth - visibleLength(left.title) - 1)) + '╮')
-    : leftColor('╭' + '─'.repeat(leftInnerWidth + 2) + '╮');
+    ? leftColor('╭─') + pc.bold(pc.white(leftTitleStr)) + leftColor('─'.repeat(Math.max(0, left.width - 3 - visibleLength(leftTitleStr))) + '╮')
+    : leftColor('╭' + '─'.repeat(left.width - 2) + '╮');
 
   const rightTop = right.title
-    ? rightColor('╭─ ') + pc.bold(right.title) + ' ' + rightColor('─'.repeat(Math.max(0, rightInnerWidth - visibleLength(right.title) - 1)) + '╮')
-    : rightColor('╭' + '─'.repeat(rightInnerWidth + 2) + '╮');
+    ? rightColor('╭─') + pc.bold(pc.white(rightTitleStr)) + rightColor('─'.repeat(Math.max(0, right.width - 3 - visibleLength(rightTitleStr))) + '╮')
+    : rightColor('╭' + '─'.repeat(right.width - 2) + '╮');
 
-  const leftBottom = leftColor('╰' + '─'.repeat(leftInnerWidth + 2) + '╯');
-  const rightBottom = rightColor('╰' + '─'.repeat(rightInnerWidth + 2) + '╯');
+  const leftBottom = leftColor('╰' + '─'.repeat(left.width - 2) + '╯');
+  const rightBottom = rightColor('╰' + '─'.repeat(right.width - 2) + '╯');
 
   const maxRows = Math.max(left.lines.length, right.lines.length);
   const rows: string[] = [];
@@ -178,10 +191,23 @@ export function renderDualPaneBox(
     const lRaw = left.lines[i] !== undefined ? left.lines[i] : '';
     const rRaw = right.lines[i] !== undefined ? right.lines[i] : '';
 
-    const lPadded = pad(lRaw, leftInnerWidth);
-    const rPadded = pad(rRaw, rightInnerWidth);
+    let lRow: string;
+    if (lRaw === '---DIVIDER---') {
+      lRow = leftColor('├' + '─'.repeat(left.width - 2) + '┤');
+    } else {
+      const lPadded = pad(lRaw, leftInnerWidth);
+      lRow = leftColor('│ ') + lPadded + leftColor(' │');
+    }
 
-    rows.push(`${leftColor('│ ')}${lPadded}${leftColor(' │')} ${rightColor('│ ')}${rPadded}${rightColor(' │')}`);
+    let rRow: string;
+    if (rRaw === '---DIVIDER---') {
+      rRow = rightColor('├' + '─'.repeat(right.width - 2) + '┤');
+    } else {
+      const rPadded = pad(rRaw, rightInnerWidth);
+      rRow = rightColor('│ ') + rPadded + rightColor(' │');
+    }
+
+    rows.push(`${lRow} ${rRow}`);
   }
 
   rows.push(`${leftBottom} ${rightBottom}`);
@@ -196,7 +222,7 @@ export function renderTelemetryBar(
   barWidth = 20
 ): string {
   if (summary.total === 0) {
-    return `${pc.green(`[${'━'.repeat(barWidth)}]`)} ${pc.bold(pc.green('✔ Clean & Synced'))}`;
+    return `${pc.green(`[${'█'.repeat(barWidth)}]`)} ${pc.bold(pc.green('✔ Clean & Synced'))}`;
   }
 
   const { staged, modified, untracked, deleted, total } = summary;
