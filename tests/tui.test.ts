@@ -46,10 +46,10 @@ describe('TUI Utility Library', () => {
     assert.equal(truncate(shortText, 10), 'Short');
   });
 
-  it('should render header with retro ASCII banner', () => {
+  it('should render header with modern banner and title', () => {
     const header = renderHeader(80);
     assert.ok(header.includes('GitRemind'));
-    assert.ok(stripAnsi(header).includes('____ _ _   ____'));
+    assert.ok(stripAnsi(header).includes('█▀▀'));
   });
 
   it('should format file badges with distinct labels and colors', () => {

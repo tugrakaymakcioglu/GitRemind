@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { RepoWatcher } from './watcher.js';
 import { configManager } from './config.js';
@@ -7,6 +8,9 @@ import { getPidPath } from '../utils/paths.js';
 import { logger } from '../utils/logger.js';
 import { DaemonStatus } from './types.js';
 import { normalizeRepoPath } from '../utils/paths.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export class GitRemindDaemon {
   private watchers = new Map<string, RepoWatcher>();
@@ -66,6 +70,30 @@ export class GitRemindDaemon {
     }
 
     try {
+      // On Windows, use run-hidden.vbs to launch fully detached from console
+      if (process.platform === 'win32') {
+        const vbsCandidates = [
+          path.resolve(__dirname, '../../scripts/run-hidden.vbs'),
+          path.resolve(__dirname, '../scripts/run-hidden.vbs'),
+          path.resolve(process.cwd(), 'scripts/run-hidden.vbs'),
+        ];
+        const vbsPath = vbsCandidates.find((p) => fs.existsSync(p));
+        if (vbsPath) {
+          logger.info('Spawning background daemon via WScript', { vbsPath, execPath: process.execPath, entryPath });
+          const child = spawn('wscript.exe', [vbsPath, process.execPath, entryPath, 'daemon', 'run'], {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          child.unref();
+
+          return {
+            success: true,
+            message: 'GitRemind service started in background.',
+          };
+        }
+      }
+
       const outLog = path.join(getPidPath(), '../daemon.stdout.log');
       const outFd = fs.openSync(outLog, 'a');
       logger.info('Spawning background daemon', { execPath: process.execPath, entryPath });
@@ -89,6 +117,27 @@ export class GitRemindDaemon {
         message: `Failed to start service: ${msg}`,
       };
     }
+  }
+
+  /**
+   * Ensures the background daemon is active, automatically starting it if stopped
+   */
+  static async ensureRunning(entryPath: string): Promise<{ running: boolean; pid?: number }> {
+    const status = GitRemindDaemon.isRunning();
+    if (status.running) {
+      return status;
+    }
+
+    GitRemindDaemon.spawnBackground(entryPath);
+    // Poll up to 1200ms for PID file initialization
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      const check = GitRemindDaemon.isRunning();
+      if (check.running) {
+        return check;
+      }
+    }
+    return GitRemindDaemon.isRunning();
   }
 
   /**

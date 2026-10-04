@@ -1,6 +1,7 @@
 import readline from 'node:readline';
 import path from 'node:path';
 import fs from 'node:fs';
+import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import pc from 'picocolors';
 import { getRepoState, getRepoRoot } from '../core/git.js';
@@ -8,6 +9,7 @@ import { configManager } from '../core/config.js';
 import { GitRemindDaemon } from '../core/daemon.js';
 import { notifier } from '../core/notifier.js';
 import { GitRepoState, WatchedRepoConfig } from '../core/types.js';
+import { normalizeRepoPath } from '../utils/paths.js';
 import {
   clearScreen,
   hideCursor,
@@ -35,6 +37,8 @@ export class DashboardApp {
   private isRunning = false;
   private isInteracting = false;
   private autoRefreshSeconds = 4;
+  private userNavigated = false;
+  private currentCwdRoot: string | null = null;
 
   /**
    * Resolves entry script path for background daemon
@@ -67,36 +71,38 @@ export class DashboardApp {
   }
 
   /**
-   * Loads all repository states
+   * Loads all repository states with automatic zero-touch Git repo detection and enrollment
    */
   private async loadState(): Promise<void> {
     const config = configManager.load();
-    const repoList: Array<{ name: string; path: string }> = [];
 
-    // Add configured watched repos
-    for (const w of config.watchedRepos) {
-      repoList.push({ name: w.name, path: w.path });
-    }
-
-    // Check if current directory is a git repo and not yet in watched list
-    const currentRoot = await getRepoRoot(process.cwd());
-    if (currentRoot) {
-      const alreadyIncluded = repoList.some(
-        (r) => path.normalize(r.path).toLowerCase() === path.normalize(currentRoot).toLowerCase()
+    // 1. Automatic Zero-Touch Detection: check if current working directory is a Git repository
+    this.currentCwdRoot = await getRepoRoot(process.cwd());
+    if (this.currentCwdRoot) {
+      const normalizedCurrent = normalizeRepoPath(this.currentCwdRoot);
+      const isAlreadyWatched = config.watchedRepos.some(
+        (r) => normalizeRepoPath(r.path).toLowerCase() === normalizedCurrent.toLowerCase()
       );
-      if (!alreadyIncluded) {
-        repoList.unshift({
-          name: `${path.basename(currentRoot)} (Current)`,
-          path: currentRoot,
-        });
+
+      if (!isAlreadyWatched) {
+        const addResult = await configManager.addRepo(normalizedCurrent);
+        if (addResult.success) {
+          this.setFlash(
+            pc.green(`⚡ Auto-detected Git repo! Enrolled "${path.basename(normalizedCurrent)}" into GitRemind.`),
+            4500
+          );
+        }
       }
     }
 
+    // 2. Read refreshed configuration
+    const freshConfig = configManager.load();
     const loadedStates: GitRepoState[] = [];
-    for (const r of repoList) {
-      if (fs.existsSync(r.path)) {
+
+    for (const w of freshConfig.watchedRepos) {
+      if (fs.existsSync(w.path)) {
         try {
-          const state = await getRepoState(r.path);
+          const state = await getRepoState(w.path);
           loadedStates.push(state);
         } catch {
           // ignore corrupted or unreadable path
@@ -105,6 +111,17 @@ export class DashboardApp {
     }
 
     this.repos = loadedStates;
+
+    // 3. Focus active repository: if standing in a git repo, auto-focus it
+    if (this.currentCwdRoot && !this.userNavigated) {
+      const normCurrent = normalizeRepoPath(this.currentCwdRoot).toLowerCase();
+      const currentIdx = this.repos.findIndex(
+        (r) => normalizeRepoPath(r.rootPath).toLowerCase() === normCurrent
+      );
+      if (currentIdx !== -1) {
+        this.selectedIndex = currentIdx;
+      }
+    }
 
     // Bounds check on selected index
     if (this.selectedIndex >= this.repos.length) {
@@ -119,6 +136,7 @@ export class DashboardApp {
     if (this.isInteracting) return;
 
     const termWidth = Math.min(Math.max(process.stdout.columns || 80, 80), 96);
+    const innerWidth = termWidth - 4;
     const daemonInfo = GitRemindDaemon.isRunning();
     const config = configManager.load();
 
@@ -150,15 +168,22 @@ export class DashboardApp {
     // 3. Repositories List Box
     const repoLines: string[] = [];
     if (this.repos.length === 0) {
-      repoLines.push(pc.gray('  No git repositories found. Press [w] to watch the current directory.'));
+      repoLines.push(pc.gray('  No git repositories found. Navigate to a Git repo to auto-enroll, or press [w].'));
     } else {
       this.repos.forEach((repo, idx) => {
         const isSelected = idx === this.selectedIndex;
+        const isCurrent = this.currentCwdRoot &&
+          normalizeRepoPath(repo.rootPath).toLowerCase() === normalizeRepoPath(this.currentCwdRoot).toLowerCase();
+
         const pointer = isSelected ? pc.bold(pc.cyan('▸ ')) : '  ';
         const num = pc.gray(`[${idx + 1}] `);
+
+        const currentTag = isCurrent ? pc.cyan('★ ') : '';
+        const rawName = currentTag + repo.name;
         const nameStr = isSelected
-          ? pc.bold(pc.white(repo.name.padEnd(20)))
-          : pc.white(repo.name.padEnd(20));
+          ? pc.bold(pc.white(rawName.padEnd(20)))
+          : pc.white(rawName.padEnd(20));
+
         const branchStr = pc.magenta(`(${repo.branch || 'HEAD'})`.padEnd(16));
         const pill = formatStatusPill(repo.isDirty, repo.summary.total);
 
@@ -181,13 +206,27 @@ export class DashboardApp {
     if (active) {
       const detailsLines: string[] = [];
 
+      // Truncate path safely if too long
+      const maxPathLen = Math.max(15, innerWidth - active.name.length - 22);
+      const safePath = active.rootPath.length > maxPathLen
+        ? '...' + active.rootPath.slice(-(maxPathLen - 3))
+        : active.rootPath;
+
       detailsLines.push(
-        `  ${pc.bold('Repository')}  : ${pc.bold(pc.cyan(active.name))}  ${pc.gray(`[${active.rootPath}]`)}`
+        `  ${pc.bold('Repository')}  : ${pc.bold(pc.cyan(active.name))}  ${pc.gray(`[${safePath}]`)}`
       );
       detailsLines.push(`  ${pc.bold('Branch')}      : ${pc.magenta(active.branch || 'unknown')}`);
 
+      // Safe commit message truncation so box right border never overflows
+      const maxMsgLen = Math.max(15, innerWidth - 36);
+      const safeMsg = active.lastCommitMessage
+        ? (active.lastCommitMessage.length > maxMsgLen
+            ? active.lastCommitMessage.slice(0, maxMsgLen - 3) + '...'
+            : active.lastCommitMessage)
+        : 'Waiting for initial commit';
+
       const lastCommitText = active.lastCommitHash
-        ? `${pc.yellow(active.lastCommitHash)} ${pc.white(`"${active.lastCommitMessage}"`)} ${pc.dim(`(${active.lastCommitRelative})`)}`
+        ? `${pc.yellow(active.lastCommitHash)} ${pc.white(`"${safeMsg}"`)} ${pc.dim(`(${active.lastCommitRelative})`)}`
         : pc.dim(active.lastCommitRelative || 'No commits yet');
 
       detailsLines.push(`  ${pc.bold('Last Commit')} : ${lastCommitText}`);
@@ -213,7 +252,7 @@ export class DashboardApp {
           detailsLines.push(pc.dim(`    ... and ${active.files.length - 7} more files`));
         }
       } else {
-        detailsLines.push(`  ${pc.bold('Status')}      : ${pc.green('✔ Working directory is clean. No pending changes.')}`);
+        detailsLines.push(`  ${pc.bold('Status')}      : ${pc.green('✔  Working directory is clean. No pending changes.')}`);
       }
 
       console.log(
@@ -239,6 +278,8 @@ export class DashboardApp {
     console.log(
       renderActionBar([
         { key: 'c', label: 'Commit' },
+        { key: 'd', label: 'Diff' },
+        { key: 'o', label: 'Open' },
         { key: 'w', label: 'Watch' },
         { key: 'u', label: 'Unwatch' },
         { key: 's', label: 'Daemon' },
@@ -255,7 +296,7 @@ export class DashboardApp {
   private async handleKey(str: string, key?: readline.Key): Promise<void> {
     if (this.isInteracting) return;
 
-    // Quit commands
+    // Quit commands: [q] or [Ctrl+C]
     if (str === 'q' || str === 'Q' || (key && key.ctrl && key.name === 'c')) {
       await this.stop();
       process.exit(0);
@@ -265,6 +306,7 @@ export class DashboardApp {
     // Navigation: Up / k
     if ((key && key.name === 'up') || str === 'k') {
       if (this.repos.length > 0) {
+        this.userNavigated = true;
         this.selectedIndex = (this.selectedIndex - 1 + this.repos.length) % this.repos.length;
         this.render();
       }
@@ -274,6 +316,7 @@ export class DashboardApp {
     // Navigation: Down / j / tab
     if ((key && key.name === 'down') || str === 'j' || (key && key.name === 'tab')) {
       if (this.repos.length > 0) {
+        this.userNavigated = true;
         this.selectedIndex = (this.selectedIndex + 1) % this.repos.length;
         this.render();
       }
@@ -335,6 +378,80 @@ export class DashboardApp {
       return;
     }
 
+    // Diff preview: [d]
+    if (str === 'd' || str === 'D') {
+      const active = this.repos[this.selectedIndex];
+      if (!active || !active.isDirty) {
+        this.setFlash(pc.yellow('No pending uncommitted changes to diff.'));
+        return;
+      }
+
+      this.isInteracting = true;
+      if (this.refreshTimer) {
+        clearInterval(this.refreshTimer);
+        this.refreshTimer = null;
+      }
+      showCursor();
+      clearScreen();
+
+      console.log(pc.bold(pc.cyan(`\n🔍 Git Diff Summary: ${active.name} (${active.branch})\n`)));
+      try {
+        const statusShort = execSync('git status -s', { cwd: active.rootPath }).toString();
+        const diffStat = execSync('git diff --stat', { cwd: active.rootPath }).toString();
+        console.log(pc.bold('Changed Files:'));
+        console.log(statusShort.trim() || pc.gray('No unstaged changes.'));
+        console.log(pc.bold('\nDiff Statistics:'));
+        console.log(diffStat.trim() || pc.gray('No tracked changes.'));
+      } catch {
+        console.log(pc.red('Could not fetch git diff statistics.'));
+      }
+
+      console.log(pc.gray('\nPress any key to return to dashboard...'));
+      await new Promise<void>((resolve) => {
+        const resumeHandler = () => {
+          process.stdin.removeListener('data', resumeHandler);
+          resolve();
+        };
+        process.stdin.once('data', resumeHandler);
+      });
+
+      this.isInteracting = false;
+      hideCursor();
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+      }
+
+      this.startRefreshTimer();
+      this.render();
+      return;
+    }
+
+    // Open active repository in editor: [o]
+    if (str === 'o' || str === 'O') {
+      const active = this.repos[this.selectedIndex];
+      if (!active) {
+        this.setFlash(pc.red('No repository to open.'));
+        return;
+      }
+
+      try {
+        const editorCmd = process.env.EDITOR || (process.platform === 'win32' ? 'code.cmd' : 'code');
+        const child = spawn(editorCmd, ['.'], {
+          cwd: active.rootPath,
+          detached: true,
+          stdio: 'ignore',
+          shell: true,
+        });
+        child.unref();
+        this.setFlash(pc.green(`🚀 Launched editor for "${active.name}".`));
+      } catch {
+        this.setFlash(pc.yellow(`Could not open editor. Try running: gitremind open code .`));
+      }
+      this.render();
+      return;
+    }
+
     // Watch repo: [w]
     if (str === 'w' || str === 'W') {
       const targetDir = this.repos[this.selectedIndex]?.rootPath || process.cwd();
@@ -383,7 +500,7 @@ export class DashboardApp {
         const entryPath = this.getEntryPath();
         const spawnRes = GitRemindDaemon.spawnBackground(entryPath);
         if (spawnRes.success) {
-          this.setFlash(pc.green(`✔ Background daemon started (PID: ${spawnRes.pid}).`));
+          this.setFlash(pc.green(`✔ Background daemon started (PID: ${spawnRes.pid || 'active'}).`));
         } else {
           this.setFlash(pc.red(`✖ ${spawnRes.message}`));
         }
@@ -433,6 +550,9 @@ export class DashboardApp {
   public async start(): Promise<void> {
     if (this.isRunning) return;
     this.isRunning = true;
+
+    // Ensure background daemon is running silently so monitoring is always active
+    await GitRemindDaemon.ensureRunning(this.getEntryPath());
 
     await this.loadState();
 
@@ -488,15 +608,10 @@ export class DashboardApp {
     showCursor();
     if (process.stdin.isTTY && process.stdin.isRaw) {
       process.stdin.setRawMode(false);
-      process.stdin.pause();
     }
-    clearScreen();
   }
 }
 
-/**
- * Convenience entry function to launch dashboard
- */
 export async function startDashboard(): Promise<void> {
   const app = new DashboardApp();
   await app.start();

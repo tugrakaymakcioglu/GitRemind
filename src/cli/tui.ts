@@ -5,7 +5,6 @@ import { GitFileStatus, FileChangeKind } from '../core/types.js';
  * Strips ANSI escape codes to calculate visual string width
  */
 export function stripAnsi(str: string): string {
-  // Matches standard ANSI color and formatting codes
   return str.replace(/\u001b\[[0-9;]*[a-zA-Z]/g, '');
 }
 
@@ -17,7 +16,21 @@ export function visibleLength(str: string): number {
 }
 
 /**
- * Pads a string to a visible width respecting ANSI escape codes
+ * Truncates a string to a visual width with ellipsis, respecting ANSI codes
+ */
+export function truncate(str: string, maxWidth: number): string {
+  const vLen = visibleLength(str);
+  if (vLen <= maxWidth) return str;
+
+  const raw = stripAnsi(str);
+  if (raw.length <= maxWidth) return str;
+
+  const cutLen = Math.max(0, maxWidth - 3);
+  return raw.slice(0, cutLen) + '...';
+}
+
+/**
+ * Pads a string to a visual width respecting ANSI escape codes
  */
 export function pad(
   str: string,
@@ -25,7 +38,10 @@ export function pad(
   align: 'left' | 'right' | 'center' = 'left'
 ): string {
   const vLen = visibleLength(str);
-  if (vLen >= targetWidth) return str;
+  if (vLen > targetWidth) {
+    return truncate(str, targetWidth);
+  }
+  if (vLen === targetWidth) return str;
 
   const diff = targetWidth - vLen;
   if (align === 'right') {
@@ -39,34 +55,22 @@ export function pad(
 }
 
 /**
- * Truncates a string to a visual width with ellipsis
- */
-export function truncate(str: string, maxWidth: number): string {
-  if (visibleLength(str) <= maxWidth) return str;
-  const raw = stripAnsi(str);
-  if (raw.length <= maxWidth) return str;
-  return raw.slice(0, Math.max(0, maxWidth - 3)) + '...';
-}
-
-/**
- * Retro ASCII art banner for GitRemind
+ * Modern compact 2-line block ASCII banner for GitRemind
  */
 export const ASCII_BANNER = [
-  '  ____ _ _   ____                 _           _ ',
-  ' / ___(_) |_|  _ \\ ___ _ __ ___ (_)_ __   __| |',
-  '| |  _| | __| |_) / _ \\ \'_ ` _ \\| | \'_ \\ / _` |',
-  '| |_| | | |_|  _ <  __/ | | | | | | | | | (_| |',
-  ' \\____|_|\\__|_| \\_\\___|_| |_| |_|_|_| |_|\\__,_|',
+  '  █▀▀ █ ▀█▀ █▀█ █▀▀ █▀▄▀█ █ █▄░█ █▀▄',
+  '  █▄█ █  █  █▀▄ ██▄ █ ▀ █ █ █ ▀█ █▄▀',
 ].join('\n');
 
 /**
- * Renders the top retro header banner
+ * Renders the top modern header banner
  */
 export function renderHeader(terminalWidth = 80): string {
-  const coloredBanner = pc.cyan(ASCII_BANNER);
-  const tag = pc.bold(pc.white('GitRemind')) + pc.gray(' • Intelligent Git Tracker & Interactive Committer');
+  const line1 = pc.bold(pc.cyan('  █▀▀ █ ▀█▀ █▀█ █▀▀ █▀▄▀█ █ █▄░█ █▀▄'));
+  const line2 = pc.bold(pc.cyan('  █▄█ █  █  █▀▄ ██▄ █ ▀ █ █ █ ▀█ █▄▀'));
+  const tag = pc.bold(pc.white('GitRemind')) + pc.gray(' • Intelligent Git Watcher & Commit Assistant');
   const divider = pc.dim('─'.repeat(Math.max(terminalWidth, 68)));
-  return `${coloredBanner}\n  ${tag}\n${divider}`;
+  return `${line1}\n${line2}   ${tag}\n${divider}`;
 }
 
 /**
@@ -113,7 +117,7 @@ export function formatStatusPill(isDirty: boolean, uncommittedCount = 0): string
 }
 
 /**
- * Renders a stylized box with rounded borders
+ * Renders a stylized box with rounded borders and strict width clipping
  */
 export function renderBox(options: {
   title?: string;
@@ -122,7 +126,7 @@ export function renderBox(options: {
   borderColor?: (str: string) => string;
 }): string {
   const { title, lines, width = 78, borderColor = pc.cyan } = options;
-  const innerWidth = width - 4; // 2 border chars + 2 padding spaces
+  const innerWidth = Math.max(20, width - 4); // 2 border chars + 2 padding spaces
 
   const topBorder = title
     ? borderColor('╭─ ') + pc.bold(title) + ' ' + borderColor('─'.repeat(Math.max(0, innerWidth - visibleLength(title) - 1)) + '╮')

@@ -100,6 +100,22 @@ program
   .command('status')
   .description('Displays daemon status and watched repository health dashboard')
   .action(async () => {
+    // 1. Auto-enroll current directory if inside a Git repository
+    const currentRoot = await getRepoRoot(process.cwd());
+    if (currentRoot) {
+      const configBefore = configManager.load();
+      const isWatched = configBefore.watchedRepos.some(
+        (r) => normalizeRepoPath(r.path).toLowerCase() === normalizeRepoPath(currentRoot).toLowerCase()
+      );
+      if (!isWatched) {
+        await configManager.addRepo(currentRoot);
+        console.log(pc.green(`⚡ Auto-detected Git repo: Enrolled "${path.basename(currentRoot)}" into GitRemind watch list!`));
+      }
+    }
+
+    // 2. Ensure background daemon is running
+    await GitRemindDaemon.ensureRunning(__filename);
+
     const isRunning = GitRemindDaemon.isRunning();
     const config = configManager.load();
 
